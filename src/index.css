@@ -1,0 +1,142 @@
+@import "tailwindcss";
+
+/* ── Gelafehaus Design Tokens ── */
+@theme {
+  --color-background: #FAF7F2;
+  --color-surface: #FFFFFF;
+  --color-ink: #1C1917;
+  --color-muted: #78716C;
+  --color-border: #E7E2DA;
+  --color-primary: #E4572E;
+  --color-primary-hover: #C94622;
+  --color-success: #2F9E6B;
+  --color-warning: #E0A030;
+  --color-danger: #D64545;
+
+  --color-sidebar: #1C1917;
+  --color-sidebar-hover: #292524;
+  --color-sidebar-active: #3B3835;
+
+  --font-heading: 'Bricolage Grotesque', sans-serif;
+  --font-body: 'Inter', sans-serif;
+
+  --radius-card: 16px;
+  --radius-input: 12px;
+  --radius-chip: 999px;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.08);
+}
+
+/* ── Base ── */
+html {
+  scroll-behavior: smooth;
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  font-family: var(--font-body);
+  color: var(--color-ink);
+  background-color: var(--color-background);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-heading);
+}
+
+/* ── Focus rings ── */
+:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* ── Scrollbar hide ── */
+.scroll-hide {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.scroll-hide::-webkit-scrollbar {
+  display: none;
+}
+
+/* ── Tabular numerals ── */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Skeleton shimmer ── */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.skeleton {
+  background: linear-gradient(90deg, var(--color-border) 25%, #f0ede8 50%, var(--color-border) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+  border-radius: var(--radius-input);
+}
+
+/* ── Overlay ── */
+.overlay-backdrop {
+  background: rgba(28, 25, 23, 0.4);
+  backdrop-filter: blur(4px);
+}
+
+/* ── Success check ── */
+@keyframes check-draw {
+  0% { stroke-dashoffset: 48; }
+  100% { stroke-dashoffset: 0; }
+}
+.check-animate {
+  stroke-dasharray: 48;
+  stroke-dashoffset: 48;
+  animation: check-draw 0.6s ease-out 0.3s forwards;
+}
+
+/* ── Shared keyframes ── */
+@keyframes sheet-up {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+@keyframes fade-in {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes highlight-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(228, 87, 46, 0); }
+  50% { box-shadow: 0 0 0 4px rgba(228, 87, 46, 0.2); }
+}
+@keyframes welcome-entrance {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.welcome-entrance {
+  animation: welcome-entrance 250ms ease-out forwards;
+}
+@keyframes slide-item-left {
+  from { opacity: 0.7; transform: translateX(20px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes slide-item-right {
+  from { opacity: 0.7; transform: translateX(-20px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+/* ── Reduced motion ── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .skeleton { animation: none; }
+}
