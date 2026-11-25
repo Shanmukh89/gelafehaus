@@ -41,6 +41,32 @@ function saveStoredFallbackOrders(orders: Order[]) {
   }
 }
 
+// ─── Lightweight Dev Server Cross-Device Sync ───
+// Enables phone (customer) and laptop (admin) on the same Wi-Fi network
+// to share orders in real time even when running without Docker/Supabase.
+function syncOrderToDevServer(order: Order) {
+  if (typeof window === 'undefined') return;
+  fetch('/_dev_sync/orders', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(order),
+  }).catch(() => {});
+}
+
+async function fetchOrdersFromDevServer(): Promise<Order[] | null> {
+  if (typeof window === 'undefined') return null;
+  try {
+    const res = await fetch('/_dev_sync/orders');
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data)) return data;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
 function getStoredFallbackMenu(): MenuItem[] {
   if (typeof window === 'undefined') return [...seedMenu];
   try {
@@ -806,6 +832,7 @@ export async function placeOrder(
   };
   fallbackOrders.unshift(order);
   saveStoredFallbackOrders(fallbackOrders);
+  syncOrderToDevServer(order);
   useCartStore.getState().resetIdempotencyKey();
   return order;
 }
@@ -854,6 +881,12 @@ export async function getOrder(orderId: string): Promise<Order | null> {
     }
   } catch (err) {
     console.warn('getOrder RPC error, checking fallback:', err);
+  }
+
+  const serverOrders = await fetchOrdersFromDevServer();
+  if (serverOrders) {
+    const found = serverOrders.find(o => o.id === orderId);
+    if (found) return { ...found };
   }
 
   fallbackOrders = getStoredFallbackOrders();
@@ -934,6 +967,13 @@ export async function getOrders(): Promise<Order[]> {
     console.warn('getOrders query error, using fallback:', err);
   }
 
+  const serverOrders = await fetchOrdersFromDevServer();
+  if (serverOrders && serverOrders.length > 0) {
+    fallbackOrders = serverOrders;
+    saveStoredFallbackOrders(serverOrders);
+    return serverOrders.map(o => ({ ...o }));
+  }
+
   fallbackOrders = getStoredFallbackOrders();
   return fallbackOrders.map(o => ({ ...o }));
 }
@@ -967,12 +1007,20 @@ export async function updateOrderStatus(
     console.warn('updateOrderStatus RPC warning:', err);
   }
 
+  const serverOrders = await fetchOrdersFromDevServer();
+  if (serverOrders && serverOrders.length > 0) {
+    fallbackOrders = serverOrders;
+  } else {
+    fallbackOrders = getStoredFallbackOrders();
+  }
+
   const order = fallbackOrders.find(o => o.id === orderId);
   if (order) {
     order.status = status;
     order.updatedAt = new Date().toISOString();
     if (rejectionReason) order.rejectionReason = rejectionReason;
     saveStoredFallbackOrders(fallbackOrders);
+    syncOrderToDevServer(order);
     return { ...order };
   }
 
