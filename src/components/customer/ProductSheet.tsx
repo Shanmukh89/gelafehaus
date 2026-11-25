@@ -65,20 +65,16 @@ export function ProductSheet({
 
   const [activeIndex, setActiveIndex] = useState(initialIndex);
 
-  // Sync index when incoming item prop opens a different product
-  const lastOpenedId = useRef<string | null>(null);
-  useEffect(() => {
-    if (open && item && item.id !== lastOpenedId.current) {
-      lastOpenedId.current = item.id;
-      const idx = categoryItems.findIndex(i => i.id === item.id);
-      if (idx >= 0) {
-        setActiveIndex(idx);
-      }
+  const [prevItemId, setPrevItemId] = useState<string | null>(item?.id ?? null);
+  if (open && item && item.id !== prevItemId) {
+    setPrevItemId(item.id);
+    const idx = categoryItems.findIndex(i => i.id === item.id);
+    if (idx >= 0) {
+      setActiveIndex(idx);
     }
-    if (!open) {
-      lastOpenedId.current = null;
-    }
-  }, [open, item, categoryItems]);
+  } else if (!open && prevItemId !== null) {
+    setPrevItemId(null);
+  }
 
   // Selected options, notes, and quantities stored in per-item map outside panels
   const [allSelections, setAllSelections] = useState<
@@ -724,17 +720,19 @@ const MemoizedItemPanel = React.memo(
     onMultiToggle,
     onNotesChange,
   }: ItemPanelProps) {
-    // Track render count per item (renders once on initial mount)
-    if (typeof window !== 'undefined') {
-      const w = window as unknown as {
-        __itemPanelRenderCounts?: Record<string, number>;
-      };
-      if (!w.__itemPanelRenderCounts) {
-        w.__itemPanelRenderCounts = {};
+    // Track render count per item (inside effect to avoid mutating globals during render)
+    useEffect(() => {
+      if (typeof window !== 'undefined') {
+        const w = window as unknown as {
+          __itemPanelRenderCounts?: Record<string, number>;
+        };
+        if (!w.__itemPanelRenderCounts) {
+          w.__itemPanelRenderCounts = {};
+        }
+        w.__itemPanelRenderCounts[item.id] =
+          (w.__itemPanelRenderCounts[item.id] || 0) + 1;
       }
-      w.__itemPanelRenderCounts[item.id] =
-        (w.__itemPanelRenderCounts[item.id] || 0) + 1;
-    }
+    });
 
     return (
       <div className="w-full pb-8 select-auto">
