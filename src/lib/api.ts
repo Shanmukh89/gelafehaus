@@ -6,12 +6,16 @@ import { supabase } from './supabase';
 import type {
   MenuItem,
   Order,
+  OrderLineItem,
+  SelectedOption,
   OrderStatus,
   PlaceOrderPayload,
   DayStats,
   MenuCategory,
   OptionGroup,
+  Offer,
 } from './types';
+import { getOfferStatus } from './types';
 import { menuItems as seedMenu } from './menu-data';
 import { useCartStore } from './cart-store';
 import { soundAlert } from './sound';
@@ -37,8 +41,47 @@ function saveStoredFallbackOrders(orders: Order[]) {
   }
 }
 
-let fallbackMenu: MenuItem[] = [...seedMenu];
+function getStoredFallbackMenu(): MenuItem[] {
+  if (typeof window === 'undefined') return [...seedMenu];
+  try {
+    const raw = localStorage.getItem('gelafehaus_fallback_menu');
+    return raw ? JSON.parse(raw) : [...seedMenu];
+  } catch {
+    return [...seedMenu];
+  }
+}
+
+function saveStoredFallbackMenu(menu: MenuItem[]) {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem('gelafehaus_fallback_menu', JSON.stringify(menu));
+  } catch {
+    // ignore
+  }
+}
+
+function getStoredFallbackOffers(): import('./types').Offer[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem('gelafehaus_fallback_offers');
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveStoredFallbackOffers(offers: import('./types').Offer[]) {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem('gelafehaus_fallback_offers', JSON.stringify(offers));
+  } catch {
+    // ignore
+  }
+}
+
+let fallbackMenu: MenuItem[] = getStoredFallbackMenu();
 let fallbackOrders: Order[] = getStoredFallbackOrders();
+let fallbackOffers: import('./types').Offer[] = getStoredFallbackOffers();
 let nextFallbackOrderNumber = 101;
 
 // ─── Global Realtime Subscription for Admin ───
@@ -132,7 +175,7 @@ export async function validateTable(
  * getMenu: One query with nested categories → items → option_groups → options.
  * Re-validates the persisted cart on load against the fetched menu items.
  */
-export async function getMenu(): Promise<MenuItem[]> {
+export async function getMenu(includeDeleted: boolean = false): Promise<MenuItem[]> {
   try {
     const query = supabase
       .from('categories')
@@ -174,11 +217,25 @@ export async function getMenu(): Promise<MenuItem[]> {
 
     const { data: categories, error } = await Promise.race([query, timeout]);
 
+    // Helper to attach active offers to menu items
+    const attachOffers = (itemList: MenuItem[]) => {
+      return itemList.map(it => {
+        const activeOffer = fallbackOffers.find(
+          o => o.menuItemId === it.id && getOfferStatus(o) === 'active'
+        );
+        return {
+          ...it,
+          offer: activeOffer || null,
+        };
+      });
+    };
+
     if (error || !categories || categories.length === 0) {
       if (error) console.warn('Supabase getMenu query warning, using local menu:', error.message);
-      // Validate cart against fallback
-      useCartStore.getState().validateCart(fallbackMenu);
-      return [...fallbackMenu];
+      const activeFallback = includeDeleted ? fallbackMenu : fallbackMenu.filter(m => !m.deletedAt);
+      const withOffers = attachOffers(activeFallback);
+      useCartStore.getState().validateCart(withOffers);
+      return withOffers;
     }
 
     const items: MenuItem[] = [];
@@ -191,6 +248,8 @@ export async function getMenu(): Promise<MenuItem[]> {
       catItems.sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
 
       for (const item of catItems) {
+        if (!includeDeleted && item.deleted_at) continue;
+
         const optionGroups: OptionGroup[] = (item.option_groups || []).map((og: any) => ({
           id: og.id,
           name: og.name,
@@ -213,19 +272,251 @@ export async function getMenu(): Promise<MenuItem[]> {
           category: catSlug,
           available: Boolean(item.is_available),
           optionGroups,
+          deletedAt: item.deleted_at || null,
         });
       }
     }
 
-    // Re-validate persisted cart against current live menu data
-    useCartStore.getState().validateCart(items);
-
-    return items;
+    const withOffers = attachOffers(items);
+    useCartStore.getState().validateCart(withOffers);
+    return withOffers;
   } catch (err) {
     console.warn('getMenu error, using fallback:', err);
-    useCartStore.getState().validateCart(fallbackMenu);
-    return [...fallbackMenu];
+    const activeFallback = (includeDeleted ? fallbackMenu : fallbackMenu.filter(m => !m.deletedAt)).map(it => {
+      const activeOffer = fallbackOffers.find(
+        o => o.menuItemId === it.id && getOfferStatus(o) === 'active'
+      );
+      return { ...it, offer: activeOffer || null };
+    });
+    useCartStore.getState().validateCart(activeFallback);
+    return activeFallback;
   }
+}
+
+/**
+ * getAdminMenu: Returns all menu items for Admin (filters out soft-deleted items by default).
+ */
+export async function getAdminMenu(): Promise<MenuItem[]> {
+  try {
+    const items = await getMenu();
+    return items;
+  } catch {
+    return fallbackMenu.filter(m => !m.deletedAt);
+  }
+}
+
+export async function softDeleteMenuItem(itemId: string): Promise<void> {
+  const now = new Date().toISOString();
+  try {
+    const { error } = await supabase
+      .from('menu_items')
+      .update({ deleted_at: now })
+      .eq('id', itemId);
+    if (error) console.warn('Supabase softDeleteMenuItem error:', error);
+  } catch (err) {
+    console.warn('softDeleteMenuItem error:', err);
+  }
+
+  const idx = fallbackMenu.findIndex(m => m.id === itemId);
+  if (idx !== -1) {
+    fallbackMenu[idx].deletedAt = now;
+    saveStoredFallbackMenu(fallbackMenu);
+  }
+}
+
+export async function restoreMenuItem(itemId: string): Promise<MenuItem> {
+  try {
+    const { data, error } = await supabase
+      .from('menu_items')
+      .update({ deleted_at: null })
+      .eq('id', itemId)
+      .select()
+      .single();
+    if (!error && data) {
+      // live updated
+    }
+  } catch (err) {
+    console.warn('restoreMenuItem error:', err);
+  }
+
+  const idx = fallbackMenu.findIndex(m => m.id === itemId);
+  if (idx === -1) throw new Error('Item not found');
+  fallbackMenu[idx].deletedAt = null;
+  saveStoredFallbackMenu(fallbackMenu);
+  return { ...fallbackMenu[idx] };
+}
+
+// ─── Limited-Time Offers API ───
+
+export async function getOffers(): Promise<Offer[]> {
+  try {
+    const { data, error } = await supabase
+      .from('offers')
+      .select(`
+        id,
+        menu_item_id,
+        label,
+        offer_price_paise,
+        starts_at,
+        ends_at,
+        is_active,
+        created_at
+      `)
+      .order('created_at', { ascending: false });
+
+    if (!error && data && data.length > 0) {
+      return data.map((o: any) => {
+        const item = fallbackMenu.find(m => m.id === o.menu_item_id);
+        return {
+          id: o.id,
+          menuItemId: o.menu_item_id,
+          label: o.label,
+          offerPrice: o.offer_price_paise,
+          startsAt: o.starts_at,
+          endsAt: o.ends_at,
+          isActive: Boolean(o.is_active),
+          createdAt: o.created_at,
+          menuItemName: item?.name,
+          menuItemBasePrice: item?.price,
+        };
+      });
+    }
+  } catch {
+    // fallback
+  }
+
+  return fallbackOffers.map(o => {
+    const item = fallbackMenu.find(m => m.id === o.menuItemId);
+    return {
+      ...o,
+      menuItemName: o.menuItemName || item?.name,
+      menuItemBasePrice: o.menuItemBasePrice || item?.price,
+    };
+  });
+}
+
+export async function createOffer(
+  data: Omit<Offer, 'id' | 'createdAt'>
+): Promise<Offer> {
+  const item = fallbackMenu.find(m => m.id === data.menuItemId);
+  if (!item) throw new Error('Menu item not found');
+  if (data.offerPrice >= item.price) {
+    throw new Error('Offer price must be strictly less than base price');
+  }
+  if (new Date(data.endsAt).getTime() <= new Date(data.startsAt).getTime()) {
+    throw new Error('End date/time must be after start date/time');
+  }
+
+  const now = new Date().toISOString();
+  try {
+    const { data: inserted, error } = await supabase
+      .from('offers')
+      .insert({
+        menu_item_id: data.menuItemId,
+        label: data.label,
+        offer_price_paise: data.offerPrice,
+        starts_at: data.startsAt,
+        ends_at: data.endsAt,
+        is_active: data.isActive,
+      })
+      .select()
+      .single();
+
+    if (!error && inserted) {
+      const newOffer: Offer = {
+        id: inserted.id,
+        menuItemId: inserted.menu_item_id,
+        label: inserted.label,
+        offerPrice: inserted.offer_price_paise,
+        startsAt: inserted.starts_at,
+        endsAt: inserted.ends_at,
+        isActive: Boolean(inserted.is_active),
+        createdAt: inserted.created_at,
+        menuItemName: item.name,
+        menuItemBasePrice: item.price,
+      };
+      fallbackOffers.unshift(newOffer);
+      saveStoredFallbackOffers(fallbackOffers);
+      return newOffer;
+    }
+  } catch {
+    // fallback
+  }
+
+  const newOffer: Offer = {
+    ...data,
+    id: `offer-${crypto.randomUUID().slice(0, 8)}`,
+    createdAt: now,
+    menuItemName: item.name,
+    menuItemBasePrice: item.price,
+  };
+  fallbackOffers.unshift(newOffer);
+  saveStoredFallbackOffers(fallbackOffers);
+  return newOffer;
+}
+
+export async function updateOffer(
+  id: string,
+  updates: Partial<Offer>
+): Promise<Offer> {
+  try {
+    const payload: Record<string, any> = {};
+    if (updates.label !== undefined) payload.label = updates.label;
+    if (updates.offerPrice !== undefined) payload.offer_price_paise = updates.offerPrice;
+    if (updates.startsAt !== undefined) payload.starts_at = updates.startsAt;
+    if (updates.endsAt !== undefined) payload.ends_at = updates.endsAt;
+    if (updates.isActive !== undefined) payload.is_active = updates.isActive;
+
+    const { data, error } = await supabase
+      .from('offers')
+      .update(payload)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (!error && data) {
+      const item = fallbackMenu.find(m => m.id === data.menu_item_id);
+      const updated: Offer = {
+        id: data.id,
+        menuItemId: data.menu_item_id,
+        label: data.label,
+        offerPrice: data.offer_price_paise,
+        startsAt: data.starts_at,
+        endsAt: data.ends_at,
+        isActive: Boolean(data.is_active),
+        createdAt: data.created_at,
+        menuItemName: item?.name,
+        menuItemBasePrice: item?.price,
+      };
+      const idx = fallbackOffers.findIndex(o => o.id === id);
+      if (idx !== -1) fallbackOffers[idx] = updated;
+      saveStoredFallbackOffers(fallbackOffers);
+      return updated;
+    }
+  } catch {
+    // fallback
+  }
+
+  const idx = fallbackOffers.findIndex(o => o.id === id);
+  if (idx === -1) throw new Error('Offer not found');
+  fallbackOffers[idx] = { ...fallbackOffers[idx], ...updates };
+  saveStoredFallbackOffers(fallbackOffers);
+  return { ...fallbackOffers[idx] };
+}
+
+export async function endOfferEarly(id: string): Promise<Offer> {
+  return updateOffer(id, { isActive: false, endsAt: new Date().toISOString() });
+}
+
+export async function deleteOffer(id: string): Promise<void> {
+  try {
+    await supabase.from('offers').delete().eq('id', id);
+  } catch {
+    // fallback
+  }
+
+  fallbackOffers = fallbackOffers.filter(o => o.id !== id);
+  saveStoredFallbackOffers(fallbackOffers);
 }
 
 export async function toggleAvailability(itemId: string): Promise<MenuItem> {
@@ -436,27 +727,79 @@ export async function placeOrder(
     console.warn('Supabase Edge Function place-order unreachable, using fallback simulation:', err);
   }
 
-  // Fallback simulation
+  // Fallback simulation (server-side validation of availability, soft-deletes, options, and live offers)
   const now = new Date().toISOString();
+  let calculatedTotal = 0;
+  const orderItems: OrderLineItem[] = [];
+
+  for (const i of payload.items) {
+    const menuItem = fallbackMenu.find(m => m.id === i.menuItemId);
+    if (!menuItem || menuItem.deletedAt) {
+      throw new Error(`Menu item not found or no longer available`);
+    }
+    if (!menuItem.available) {
+      throw new Error(`ITEM_UNAVAILABLE: ${menuItem.name} is sold out`);
+    }
+
+    // Server-side offer resolution
+    let unitPrice = menuItem.price;
+    if (i.offerId) {
+      const offer = fallbackOffers.find(o => o.id === i.offerId && o.menuItemId === menuItem.id);
+      if (!offer || getOfferStatus(offer) !== 'active') {
+        throw new Error(`OFFER_EXPIRED: The offer for ${menuItem.name} has expired`);
+      }
+      unitPrice = offer.offerPrice;
+    } else {
+      // Automatic live offer detection
+      const activeOffer = fallbackOffers.find(
+        o => o.menuItemId === menuItem.id && getOfferStatus(o) === 'active'
+      );
+      if (activeOffer) {
+        unitPrice = activeOffer.offerPrice;
+      }
+    }
+
+    // Server-side options price calculation
+    let optionsPrice = 0;
+    const selectedOpts: SelectedOption[] = [];
+    if (i.optionIds && i.optionIds.length > 0) {
+      for (const optId of i.optionIds) {
+        for (const og of menuItem.optionGroups || []) {
+          const opt = (og.options || []).find(o => o.id === optId);
+          if (opt) {
+            optionsPrice += opt.price;
+            selectedOpts.push({
+              groupId: og.id,
+              groupName: og.name,
+              optionId: opt.id,
+              optionName: opt.name,
+              price: opt.price,
+            });
+          }
+        }
+      }
+    }
+
+    const lineUnit = unitPrice + optionsPrice;
+    const lineTotal = lineUnit * i.quantity;
+    calculatedTotal += lineTotal;
+
+    orderItems.push({
+      menuItemId: i.menuItemId,
+      name: menuItem.name,
+      quantity: i.quantity,
+      options: selectedOpts,
+      lineTotal,
+    });
+  }
+
   const order: Order = {
     id: crypto.randomUUID(),
     orderNumber: nextFallbackOrderNumber++,
     customerName: payload.customerName,
     tableNumber: payload.tableNumber,
-    items: payload.items.map(i => {
-      const menuItem = fallbackMenu.find(m => m.id === i.menuItemId);
-      return {
-        menuItemId: i.menuItemId,
-        name: menuItem?.name || 'Item',
-        quantity: i.quantity,
-        options: [],
-        lineTotal: (menuItem?.price || 24900) * i.quantity,
-      };
-    }),
-    total: payload.items.reduce((acc, i) => {
-      const menuItem = fallbackMenu.find(m => m.id === i.menuItemId);
-      return acc + (menuItem?.price || 24900) * i.quantity;
-    }, 0),
+    items: orderItems,
+    total: calculatedTotal,
     status: 'received',
     createdAt: now,
     updatedAt: now,

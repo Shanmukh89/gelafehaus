@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { CartItem, MenuItem, SelectedOption } from './types';
+import { getOfferStatus } from './types';
 import { cartTotal } from './utils';
 
 export interface CartState {
@@ -187,16 +188,39 @@ export const useCartStore = create<CartState>((set, get) => {
 
       const menuMap = new Map(menuItems.map(m => [m.id, m]));
       const validItems: CartItem[] = [];
+      const expiredOffers: { name: string; oldPrice: number; newPrice: number }[] = [];
 
       for (const cartItem of currentItems) {
         const liveItem = menuMap.get(cartItem.menuItemId);
-        if (!liveItem || !liveItem.available) {
+        if (!liveItem || !liveItem.available || liveItem.deletedAt) {
           continue;
         }
 
         const updatedItem = { ...cartItem };
-        if (cartItem.basePrice !== liveItem.price) {
+        const activeOffer =
+          liveItem.offer && getOfferStatus(liveItem.offer) === 'active'
+            ? liveItem.offer
+            : null;
+
+        if (activeOffer) {
+          updatedItem.basePrice = activeOffer.offerPrice;
+          updatedItem.originalPrice = liveItem.price;
+          updatedItem.offerId = activeOffer.id;
+        } else {
+          // If item was held at offer price but offer is now inactive/expired
+          if (
+            cartItem.offerId ||
+            (cartItem.originalPrice && cartItem.basePrice < liveItem.price)
+          ) {
+            expiredOffers.push({
+              name: liveItem.name,
+              oldPrice: cartItem.basePrice,
+              newPrice: liveItem.price,
+            });
+          }
           updatedItem.basePrice = liveItem.price;
+          updatedItem.originalPrice = undefined;
+          updatedItem.offerId = undefined;
         }
 
         const validOptions: SelectedOption[] = [];
@@ -223,6 +247,16 @@ export const useCartStore = create<CartState>((set, get) => {
 
       set({ items: validItems });
       saveCart(get().tableNumber, validItems);
+
+      if (expiredOffers.length > 0 && typeof window !== 'undefined') {
+        expiredOffers.forEach(eo => {
+          window.dispatchEvent(
+            new CustomEvent('gelafehaus:offer_expired', {
+              detail: eo,
+            })
+          );
+        });
+      }
     },
   };
 });

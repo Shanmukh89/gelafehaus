@@ -1,5 +1,12 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { getMenu, toggleAvailability, updateMenuItem, addMenuItem } from '../../lib/api';
+import {
+  getMenu,
+  toggleAvailability,
+  updateMenuItem,
+  addMenuItem,
+  softDeleteMenuItem,
+  restoreMenuItem,
+} from '../../lib/api';
 import type { MenuItem, MenuCategory } from '../../lib/types';
 import { CATEGORIES, CATEGORY_LABELS } from '../../lib/types';
 import { formatPrice } from '../../lib/utils';
@@ -14,7 +21,7 @@ import Textarea from '../../components/ui/Textarea';
 import Skeleton from '../../components/ui/Skeleton';
 import ErrorState from '../../components/ui/ErrorState';
 import { useToast } from '../../components/ui/useToast';
-import { Plus, Edit2, Check, X, Search } from 'lucide-react';
+import { Plus, Edit2, Check, X, Search, Trash2 } from 'lucide-react';
 
 export default function MenuManagerPage() {
   const [items, setItems] = useState<MenuItem[]>([]);
@@ -30,6 +37,9 @@ export default function MenuManagerPage() {
   // Add / Edit Dialog state
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<MenuItem | null>(null);
+
+  // Delete Confirm Dialog state
+  const [deletingItem, setDeletingItem] = useState<MenuItem | null>(null);
 
   // Form fields
   const [formName, setFormName] = useState('');
@@ -195,6 +205,44 @@ export default function MenuManagerPage() {
     }
   }
 
+  async function handleConfirmDelete() {
+    if (!deletingItem) return;
+    const itemToDelete = deletingItem;
+    setDeletingItem(null);
+
+    // Optimistic removal from UI
+    setItems(prev => prev.filter(i => i.id !== itemToDelete.id));
+
+    try {
+      await softDeleteMenuItem(itemToDelete.id);
+
+      // Toast with 5s Undo button
+      toast(`Deleted ${itemToDelete.name}`, {
+        type: 'info',
+        duration: 5000,
+        action: {
+          label: 'Undo',
+          onClick: async () => {
+            try {
+              await restoreMenuItem(itemToDelete.id);
+              // Re-insert item into list optimistically
+              setItems(prev => {
+                if (prev.some(i => i.id === itemToDelete.id)) return prev;
+                return [...prev, itemToDelete];
+              });
+              toast(`Restored ${itemToDelete.name}`, 'success');
+            } catch {
+              toast(`Failed to restore ${itemToDelete.name}`, 'error');
+            }
+          },
+        },
+      });
+    } catch {
+      toast(`Failed to delete ${itemToDelete.name}`, 'error');
+      fetchMenuItems();
+    }
+  }
+
   // Filtered Items
   const filteredItems = items.filter(item => {
     const matchesCat = selectedCategory === 'all' || item.category === selectedCategory;
@@ -357,14 +405,26 @@ export default function MenuManagerPage() {
 
                     {/* Actions */}
                     <td className="py-3.5 px-4 text-right whitespace-nowrap">
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        onClick={() => openEditDialog(item)}
-                        icon={<Edit2 className="h-3.5 w-3.5" />}
-                      >
-                        Edit
-                      </Button>
+                      <div className="flex items-center justify-end gap-2">
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => openEditDialog(item)}
+                          icon={<Edit2 className="h-3.5 w-3.5" />}
+                        >
+                          Edit
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => setDeletingItem(item)}
+                          className="text-danger hover:text-danger hover:bg-danger/10"
+                          icon={<Trash2 className="h-3.5 w-3.5" />}
+                          aria-label={`Delete ${item.name}`}
+                        >
+                          Delete
+                        </Button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -448,6 +508,36 @@ export default function MenuManagerPage() {
             </Button>
           </div>
         </form>
+      </Dialog>
+
+      {/* Delete Item Confirm Dialog */}
+      <Dialog
+        open={Boolean(deletingItem)}
+        onClose={() => setDeletingItem(null)}
+        title="Delete Menu Item"
+        maxWidth="max-w-md"
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-ink leading-relaxed">
+            Delete <strong className="font-semibold text-ink">{deletingItem?.name}</strong>? Past orders are unaffected.
+          </p>
+          <div className="flex items-center justify-end gap-3 pt-2">
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => setDeletingItem(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="danger"
+              onClick={handleConfirmDelete}
+            >
+              Delete
+            </Button>
+          </div>
+        </div>
       </Dialog>
     </div>
   );

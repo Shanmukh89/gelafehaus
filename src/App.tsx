@@ -15,6 +15,7 @@ const AdminAuthGuard = lazy(() => import('./components/admin/AdminAuthGuard'));
 const AdminLoginPage = lazy(() => import('./pages/admin/AdminLoginPage'));
 const OrdersPage = lazy(() => import('./pages/admin/OrdersPage'));
 const MenuManagerPage = lazy(() => import('./pages/admin/MenuManagerPage'));
+const OffersPage = lazy(() => import('./pages/admin/OffersPage'));
 const TodayPage = lazy(() => import('./pages/admin/TodayPage'));
 
 function PageFallback() {
@@ -56,6 +57,7 @@ export default function App() {
             >
               <Route index element={<OrdersPage />} />
               <Route path="menu" element={<MenuManagerPage />} />
+              <Route path="offers" element={<OffersPage />} />
               <Route path="today" element={<TodayPage />} />
             </Route>
 

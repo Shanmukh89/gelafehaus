@@ -10,6 +10,33 @@ export interface MenuItem {
   category: MenuCategory;
   available: boolean;
   optionGroups: OptionGroup[];
+  deletedAt?: string | null;
+  offer?: Offer | null;
+}
+
+export interface Offer {
+  id: string;
+  menuItemId: string;
+  label: string; // e.g. "Weekend Deal"
+  offerPrice: number; // paise
+  startsAt: string; // ISO
+  endsAt: string; // ISO
+  isActive: boolean;
+  createdAt?: string;
+  menuItemName?: string;
+  menuItemBasePrice?: number;
+}
+
+export type OfferStatus = 'active' | 'scheduled' | 'expired';
+
+export function getOfferStatus(offer: Offer): OfferStatus {
+  if (!offer.isActive) return 'expired';
+  const now = Date.now();
+  const starts = new Date(offer.startsAt).getTime();
+  const ends = new Date(offer.endsAt).getTime();
+  if (now < starts) return 'scheduled';
+  if (now >= ends) return 'expired';
+  return 'active';
 }
 
 export type MenuCategory = 'burgers' | 'sides' | 'shakes' | 'drinks';
@@ -46,6 +73,8 @@ export interface CartItem {
   name: string;
   image: string;
   basePrice: number;
+  originalPrice?: number;
+  offerId?: string;
   quantity: number;
   selectedOptions: SelectedOption[];
   notes: string;
@@ -94,6 +123,7 @@ export interface PlaceOrderPayload {
     quantity: number;
     optionIds: string[];
     notes: string;
+    offerId?: string;
   }[];
 }
 

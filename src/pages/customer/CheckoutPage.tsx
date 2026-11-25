@@ -68,6 +68,7 @@ export default function CheckoutPage() {
           quantity: item.quantity,
           optionIds: item.selectedOptions.map(o => o.optionId),
           notes: item.notes || '',
+          offerId: item.offerId,
         })),
       };
 
@@ -174,9 +175,20 @@ export default function CheckoutPage() {
                       </p>
                     )}
                   </div>
-                  <span className="text-sm font-semibold text-ink tabular-nums shrink-0">
-                    {formatPrice(cartItemTotal(item))}
-                  </span>
+                  <div className="text-right shrink-0">
+                    <span className="text-sm font-semibold text-ink tabular-nums block">
+                      {formatPrice(cartItemTotal(item))}
+                    </span>
+                    {item.originalPrice && item.originalPrice > item.basePrice && (
+                      <span className="text-xs text-muted line-through tabular-nums block">
+                        {formatPrice(
+                          (item.originalPrice +
+                            item.selectedOptions.reduce((s, o) => s + o.price, 0)) *
+                            item.quantity
+                        )}
+                      </span>
+                    )}
+                  </div>
                 </li>
               ))}
             </ul>

@@ -1,11 +1,16 @@
 import { useEffect, useState, useCallback, type ReactNode } from 'react';
 import { CheckCircle2, AlertCircle, X, Info } from 'lucide-react';
-import { ToastContext, type ToastType } from './ToastContext';
+import { ToastContext, type ToastType, type ToastOptions } from './ToastContext';
 
 interface Toast {
   id: string;
   message: string;
   type: ToastType;
+  duration: number;
+  action?: {
+    label: string;
+    onClick: () => void;
+  };
 }
 
 const icons: Record<ToastType, ReactNode> = {
@@ -17,9 +22,21 @@ const icons: Record<ToastType, ReactNode> = {
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
 
-  const addToast = useCallback((message: string, type: ToastType = 'success') => {
+  const addToast = useCallback((message: string, typeOrOptions: ToastType | ToastOptions = 'success') => {
     const id = crypto.randomUUID();
-    setToasts(prev => [...prev, { id, message, type }]);
+    let type: ToastType = 'success';
+    let duration = 4000;
+    let action: { label: string; onClick: () => void } | undefined;
+
+    if (typeof typeOrOptions === 'string') {
+      type = typeOrOptions;
+    } else if (typeOrOptions) {
+      type = typeOrOptions.type || 'success';
+      duration = typeOrOptions.duration || 4000;
+      action = typeOrOptions.action;
+    }
+
+    setToasts(prev => [...prev, { id, message, type, duration, action }]);
   }, []);
 
   const removeToast = useCallback((id: string) => {
@@ -40,9 +57,9 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 
 function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: (id: string) => void }) {
   useEffect(() => {
-    const timer = setTimeout(() => onDismiss(toast.id), 4000);
+    const timer = setTimeout(() => onDismiss(toast.id), toast.duration);
     return () => clearTimeout(timer);
-  }, [toast.id, onDismiss]);
+  }, [toast.id, toast.duration, onDismiss]);
 
   return (
     <div
@@ -51,6 +68,17 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: (id: string)
     >
       {icons[toast.type]}
       <p className="text-sm text-ink flex-1">{toast.message}</p>
+      {toast.action && (
+        <button
+          onClick={() => {
+            toast.action?.onClick();
+            onDismiss(toast.id);
+          }}
+          className="text-xs font-bold text-primary hover:underline px-2 py-1 rounded bg-primary/10 hover:bg-primary/20 transition-colors cursor-pointer shrink-0"
+        >
+          {toast.action.label}
+        </button>
+      )}
       <button onClick={() => onDismiss(toast.id)} aria-label="Dismiss" className="text-muted hover:text-ink shrink-0 cursor-pointer">
         <X className="h-4 w-4" />
       </button>

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
-import { ClipboardList, UtensilsCrossed, BarChart3, Volume2, VolumeX, LogOut, ExternalLink } from 'lucide-react';
+import { ClipboardList, UtensilsCrossed, BarChart3, Volume2, VolumeX, LogOut, ExternalLink, Tag } from 'lucide-react';
 import { soundAlert } from '../../lib/sound';
 import { setAuthenticated } from '../../lib/auth';
 import OfflineBanner from '../ui/OfflineBanner';
@@ -24,6 +24,7 @@ export default function AdminLayout() {
   const navItems = [
     { to: '/admin', end: true, label: 'Orders', icon: ClipboardList },
     { to: '/admin/menu', label: 'Menu Manager', icon: UtensilsCrossed },
+    { to: '/admin/offers', label: 'Offers', icon: Tag },
     { to: '/admin/today', label: 'Today', icon: BarChart3 },
   ];
 

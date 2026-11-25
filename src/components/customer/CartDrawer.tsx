@@ -111,9 +111,20 @@ function CartDrawerComponent({ open, onClose }: CartDrawerProps) {
                           <p className="text-xs text-muted mt-0.5 italic">Note: {item.notes}</p>
                         )}
                       </div>
-                      <p className="text-sm font-semibold text-ink tabular-nums shrink-0">
-                        {formatPrice(cartItemTotal(item))}
-                      </p>
+                      <div className="text-right shrink-0">
+                        <p className="text-sm font-semibold text-ink tabular-nums">
+                          {formatPrice(cartItemTotal(item))}
+                        </p>
+                        {item.originalPrice && item.originalPrice > item.basePrice && (
+                          <p className="text-xs text-muted line-through tabular-nums">
+                            {formatPrice(
+                              (item.originalPrice +
+                                item.selectedOptions.reduce((s, o) => s + o.price, 0)) *
+                                item.quantity
+                            )}
+                          </p>
+                        )}
+                      </div>
                     </div>
 
                     <div className="flex items-center justify-between mt-3">

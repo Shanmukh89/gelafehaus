@@ -1,11 +1,11 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
-import { Search, ShoppingCart } from 'lucide-react';
+import { Search, ShoppingCart, Sparkles, Clock } from 'lucide-react';
 import { getMenu } from '../../lib/api';
 import { useCartStore } from '../../lib/cart-store';
 import { formatPrice, padTableNumber } from '../../lib/utils';
 import type { MenuItem, MenuCategory } from '../../lib/types';
-import { CATEGORIES, CATEGORY_LABELS } from '../../lib/types';
+import { CATEGORIES, CATEGORY_LABELS, getOfferStatus } from '../../lib/types';
 import Badge from '../../components/ui/Badge';
 import Chip from '../../components/ui/Chip';
 import Button from '../../components/ui/Button';
@@ -33,14 +33,27 @@ export default function MenuPage() {
   const [items, setItems] = useState<MenuItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  type ActiveCategory = MenuCategory | 'offers';
   const [search, setSearch] = useState('');
-  const [activeCategory, setActiveCategory] = useState<MenuCategory>('burgers');
+  const [activeCategory, setActiveCategory] = useState<ActiveCategory>('burgers');
   const [customizerItem, setCustomizerItem] = useState<MenuItem | null>(null);
   const lastTriggerRef = useRef<HTMLElement | null>(null);
 
   const sectionRefs = useRef<Record<string, HTMLElement | null>>({});
   const chipContainerRef = useRef<HTMLDivElement>(null);
   const isScrollingToCategory = useRef(false);
+
+  // Live offers filtered by search
+  const liveOfferItems = useMemo(() => {
+    return items.filter(
+      i =>
+        i.offer &&
+        getOfferStatus(i.offer) === 'active' &&
+        (!search || i.name.toLowerCase().includes(search.toLowerCase()))
+    );
+  }, [items, search]);
+
+  const hasLiveOffers = liveOfferItems.length > 0;
 
   function handleOpenCustomizer(item: MenuItem, triggerEl?: HTMLElement) {
     lastTriggerRef.current = triggerEl || (document.activeElement as HTMLElement);
@@ -84,6 +97,7 @@ export default function MenuPage() {
     try {
       const data = await getMenu();
       setItems(data);
+      useCartStore.getState().validateCart(data);
     } catch {
       setError('Failed to load menu');
     } finally {
@@ -99,6 +113,7 @@ export default function MenuPage() {
       .then(data => {
         if (!ignore) {
           setItems(data);
+          useCartStore.getState().validateCart(data);
           setError(null);
         }
       })
@@ -114,6 +129,22 @@ export default function MenuPage() {
     };
   }, [confirmedTable]);
 
+  // Listen for offer expiration notifications from cart revalidation
+  useEffect(() => {
+    const handleOfferExpired = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail && detail.name) {
+        toast(
+          `Offer for "${detail.name}" has expired. Price updated to ${formatPrice(detail.newPrice)}.`,
+          'info'
+        );
+      }
+    };
+    window.addEventListener('gelafehaus:offer_expired', handleOfferExpired);
+    return () =>
+      window.removeEventListener('gelafehaus:offer_expired', handleOfferExpired);
+  }, [toast]);
+
   // Scroll-spy: watch which category section is in view
   useEffect(() => {
     if (loading || isScrollingToCategory.current) return;
@@ -123,7 +154,7 @@ export default function MenuPage() {
         if (isScrollingToCategory.current) return;
         for (const entry of entries) {
           if (entry.isIntersecting) {
-            const cat = entry.target.getAttribute('data-category') as MenuCategory;
+            const cat = entry.target.getAttribute('data-category') as ActiveCategory;
             if (cat) setActiveCategory(cat);
           }
         }
@@ -131,22 +162,28 @@ export default function MenuPage() {
       { rootMargin: '-120px 0px -60% 0px', threshold: 0 }
     );
 
-    for (const cat of CATEGORIES) {
+    const categoriesToObserve: ActiveCategory[] = hasLiveOffers
+      ? ['offers', ...CATEGORIES]
+      : CATEGORIES;
+
+    for (const cat of categoriesToObserve) {
       const el = sectionRefs.current[cat];
       if (el) observer.observe(el);
     }
 
     return () => observer.disconnect();
-  }, [loading, items]);
+  }, [loading, items, hasLiveOffers]);
 
   // Click on chip → scroll to section
-  function scrollToCategory(cat: MenuCategory) {
+  function scrollToCategory(cat: ActiveCategory) {
     const el = sectionRefs.current[cat];
     if (!el) return;
     isScrollingToCategory.current = true;
     setActiveCategory(cat);
     el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    setTimeout(() => { isScrollingToCategory.current = false; }, 600);
+    setTimeout(() => {
+      isScrollingToCategory.current = false;
+    }, 600);
   }
 
   // Filter items by search
@@ -169,6 +206,9 @@ export default function MenuPage() {
       item.optionGroups.length > 0 &&
       item.optionGroups.some(g => g.options && g.options.length > 0)
     );
+    const isOffer = Boolean(item.offer && getOfferStatus(item.offer) === 'active');
+    const effectivePrice = isOffer ? item.offer!.offerPrice : item.price;
+
     if (hasOptions) {
       handleOpenCustomizer(item, triggerEl);
     } else {
@@ -176,7 +216,9 @@ export default function MenuPage() {
         menuItemId: item.id,
         name: item.name,
         image: item.image,
-        basePrice: item.price,
+        basePrice: effectivePrice,
+        originalPrice: isOffer ? item.price : undefined,
+        offerId: isOffer ? item.offer!.id : undefined,
         quantity: 1,
         selectedOptions: [],
         notes: '',
@@ -242,6 +284,14 @@ export default function MenuPage() {
           ref={chipContainerRef}
           className="flex gap-2 px-4 pb-3 overflow-x-auto scroll-hide"
         >
+          {hasLiveOffers && (
+            <Chip
+              key="offers"
+              label="Offers"
+              active={activeCategory === 'offers'}
+              onClick={() => scrollToCategory('offers')}
+            />
+          )}
           {CATEGORIES.map(cat => (
             <Chip
               key={cat}
@@ -257,12 +307,36 @@ export default function MenuPage() {
       <main className="px-4 pt-4">
         {loading && <MenuSkeleton />}
         {error && <ErrorState message={error} onRetry={fetchMenu} />}
-        {!loading && !error && grouped.length === 0 && (
+        {!loading && !error && grouped.length === 0 && !hasLiveOffers && (
           <EmptyState
             icon={<Search className="h-12 w-12" />}
             title="No items found"
             description={search ? 'Try a different search term.' : 'The menu is empty.'}
           />
+        )}
+
+        {/* ─── Pinned Limited Time Offers section ─── */}
+        {!loading && !error && hasLiveOffers && (
+          <section
+            ref={el => { sectionRefs.current['offers'] = el; }}
+            data-category="offers"
+            className="mb-8 scroll-mt-36"
+          >
+            <div className="flex items-center gap-2 mb-4">
+              <Sparkles className="w-5 h-5 text-primary" />
+              <h2 className="font-heading font-bold text-xl text-ink">Limited Time Offers</h2>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {liveOfferItems.map(item => (
+                <MenuItemCard
+                  key={`offer-${item.id}`}
+                  item={item}
+                  onAdd={el => handleAddItem(item, el)}
+                  onOpen={el => handleOpenCustomizer(item, el)}
+                />
+              ))}
+            </div>
+          </section>
         )}
 
         {!loading && !error && grouped.map(group => (
@@ -308,6 +382,57 @@ export default function MenuPage() {
   );
 }
 
+// ─── Live Offer Countdown ───
+
+function OfferCountdown({ endsAt }: { endsAt: string }) {
+  const [timeLeft, setTimeLeft] = useState<{ text: string; isEndingSoon: boolean }>({
+    text: '',
+    isEndingSoon: false,
+  });
+
+  useEffect(() => {
+    function calculate() {
+      const diff = new Date(endsAt).getTime() - Date.now();
+      if (diff <= 0) {
+        setTimeLeft({ text: 'Offer ended', isEndingSoon: true });
+        return;
+      }
+      const isEndingSoon = diff < 60 * 60 * 1000;
+      const hours = Math.floor(diff / (1000 * 60 * 60));
+      const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+      const seconds = Math.floor((diff % (1000 * 60)) / 1000);
+
+      let text = '';
+      if (hours > 0) {
+        text = `Ends in ${hours}h ${minutes}m`;
+      } else {
+        text = `Ends in ${minutes}m ${seconds}s`;
+      }
+      setTimeLeft({ text, isEndingSoon });
+    }
+
+    calculate();
+    const interval = setInterval(calculate, 1000);
+    return () => clearInterval(interval);
+  }, [endsAt]);
+
+  if (!timeLeft.text) return null;
+
+  return (
+    <span
+      data-testid="offer-countdown"
+      className={`inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full tabular-nums ${
+        timeLeft.isEndingSoon
+          ? 'bg-red-500/10 text-red-600 border border-red-500/20'
+          : 'bg-primary/10 text-primary border border-primary/20'
+      }`}
+    >
+      <Clock className="w-3 h-3" />
+      {timeLeft.text}
+    </span>
+  );
+}
+
 // ─── Menu Item Card ───
 
 function MenuItemCard({
@@ -321,6 +446,9 @@ function MenuItemCard({
 }) {
   const cardRef = useRef<HTMLElement>(null);
   const soldOut = !item.available;
+  const isOffer = Boolean(item.offer && getOfferStatus(item.offer) === 'active');
+  const offer = item.offer;
+  const effectivePrice = isOffer && offer ? offer.offerPrice : item.price;
 
   return (
     <article
@@ -348,6 +476,14 @@ function MenuItemCard({
     >
       <div className="relative">
         <FoodImage src={item.image} alt={item.name} className="rounded-none" />
+        <div className="absolute top-3 left-3 flex flex-col gap-1 items-start">
+          {isOffer && offer && (
+            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-primary text-white shadow-sm">
+              <Sparkles className="w-3 h-3" />
+              {offer.label}
+            </span>
+          )}
+        </div>
         {soldOut && (
           <div className="absolute top-3 right-3">
             <Badge variant="danger">Sold out</Badge>
@@ -355,10 +491,26 @@ function MenuItemCard({
         )}
       </div>
       <div className="p-4">
-        <h3 className="font-heading font-semibold text-base text-ink">{item.name}</h3>
+        <div className="flex items-start justify-between gap-2">
+          <h3 className="font-heading font-semibold text-base text-ink">{item.name}</h3>
+        </div>
+        {isOffer && offer && (
+          <div className="mt-1">
+            <OfferCountdown endsAt={offer.endsAt} />
+          </div>
+        )}
         <p className="text-sm text-muted line-clamp-2 mt-1 min-h-[2.5rem]">{item.description}</p>
         <div className="flex items-center justify-between mt-3">
-          <span className="text-base font-semibold text-ink tabular-nums">{formatPrice(item.price)}</span>
+          <div className="flex items-baseline gap-2">
+            <span className="text-base font-semibold text-ink tabular-nums">
+              {formatPrice(effectivePrice)}
+            </span>
+            {isOffer && (
+              <span className="text-xs text-muted line-through tabular-nums">
+                {formatPrice(item.price)}
+              </span>
+            )}
+          </div>
           <Button
             size="sm"
             variant={soldOut ? 'secondary' : 'primary'}

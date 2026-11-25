@@ -7,6 +7,7 @@ import React, {
   useLayoutEffect,
 } from 'react';
 import type { MenuItem, SelectedOption } from '../../lib/types';
+import { getOfferStatus } from '../../lib/types';
 import { formatPrice } from '../../lib/utils';
 import { useCartStore } from '../../lib/cart-store';
 import { useToast } from '../ui/useToast';
@@ -412,13 +413,19 @@ export function ProductSheet({
     return result;
   }, [currentItem, activeSelections]);
 
+  const hasActiveOffer = Boolean(
+    currentItem?.offer && getOfferStatus(currentItem.offer) === 'active'
+  );
+  const effectiveBasePrice = hasActiveOffer
+    ? currentItem!.offer!.offerPrice
+    : (currentItem?.price ?? 0);
+
   const unitPrice = useMemo(() => {
-    if (!currentItem) return 0;
     return (
-      currentItem.price +
+      effectiveBasePrice +
       selectedOptionsList.reduce((sum, o) => sum + o.price, 0)
     );
-  }, [currentItem, selectedOptionsList]);
+  }, [effectiveBasePrice, selectedOptionsList]);
 
   const totalPrice = unitPrice * activeQuantity;
 
@@ -460,12 +467,14 @@ export function ProductSheet({
       setIsAdded(false);
     }, 600);
 
-    // Add item to cart store
+    // Add item to cart store with offer price if live
     addItem({
       menuItemId: currentItem.id,
       name: currentItem.name,
       image: currentItem.image,
-      basePrice: currentItem.price,
+      basePrice: effectiveBasePrice,
+      originalPrice: hasActiveOffer ? currentItem.price : undefined,
+      offerId: hasActiveOffer ? currentItem.offer!.id : undefined,
       quantity: activeQuantity,
       selectedOptions: selectedOptionsList,
       notes: activeNotes,
@@ -537,6 +546,8 @@ export function ProductSheet({
     selectedOptionsList,
     activeNotes,
     activeQuantity,
+    effectiveBasePrice,
+    hasActiveOffer,
     addItem,
     onClose,
     toast,
@@ -810,15 +821,31 @@ const MemoizedItemPanel = React.memo(
 
         {/* Item info with reserved min-heights */}
         <div className="px-5 pt-4">
-          <h2 className="text-xl font-heading font-bold text-ink min-h-[1.75rem]">
-            {item.name}
-          </h2>
+          <div className="flex items-center gap-2">
+            <h2 className="text-xl font-heading font-bold text-ink min-h-[1.75rem]">
+              {item.name}
+            </h2>
+            {item.offer && getOfferStatus(item.offer) === 'active' && (
+              <Badge variant="primary">{item.offer.label}</Badge>
+            )}
+          </div>
           <p className="text-sm text-muted mt-1 line-clamp-2 min-h-[2.5rem]">
             {item.description}
           </p>
-          <p className="text-lg font-heading font-bold text-ink tabular-nums mt-2">
-            {formatPrice(item.price)}
-          </p>
+          <div className="flex items-baseline gap-2 mt-2">
+            <span className="text-lg font-heading font-bold text-primary tabular-nums">
+              {formatPrice(
+                item.offer && getOfferStatus(item.offer) === 'active'
+                  ? item.offer.offerPrice
+                  : item.price
+              )}
+            </span>
+            {item.offer && getOfferStatus(item.offer) === 'active' && (
+              <span className="text-sm text-muted line-through tabular-nums">
+                {formatPrice(item.price)}
+              </span>
+            )}
+          </div>
         </div>
 
         {/* Option Groups */}
@@ -948,6 +975,8 @@ const MemoizedItemPanel = React.memo(
   },
   function areItemPanelPropsEqual(prev: ItemPanelProps, next: ItemPanelProps) {
     if (prev.item.id !== next.item.id) return false;
+    if (prev.item.price !== next.item.price) return false;
+    if (prev.item.offer?.id !== next.item.offer?.id) return false;
     if (prev.notes !== next.notes) return false;
     if (prev.errors !== next.errors) {
       if (
