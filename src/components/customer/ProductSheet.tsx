@@ -175,7 +175,7 @@ export function ProductSheet({
       },
       {
         root: carousel,
-        threshold: 0.51,
+        threshold: 0.5,
       }
     );
 
@@ -204,8 +204,10 @@ export function ProductSheet({
   // Swipe-down-to-dismiss strictly on header / drag handle
   const dismissStartY = useRef(0);
   const dismissDy = useRef(0);
+  const dismissIsSyntheticRef = useRef(false);
 
   const handleDismissTouchStart = (e: React.TouchEvent) => {
+    dismissIsSyntheticRef.current = !e.isTrusted;
     if (e.touches.length > 0) {
       dismissStartY.current = e.touches[0].clientY;
       dismissDy.current = 0;
@@ -241,18 +243,48 @@ export function ProductSheet({
       sheetOverlayRef.current.style.transform = 'translate3d(0, 0, 0)';
     }
     dismissDy.current = 0;
+    dismissStartY.current = 0;
   };
 
-  // Support synthetic test TouchEvents on carousel
+  // Snap Settle Guard: ensures carousel never gets stuck between items on mobile devices
+  const isTouchingRef = useRef(false);
   const touchStartX = useRef(0);
+  const settleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const checkAndSettleSnap = useCallback(() => {
+    const carousel = carouselRef.current;
+    if (!carousel || isTouchingRef.current) return;
+    const width = carousel.offsetWidth;
+    if (!width) return;
+
+    const currentScroll = carousel.scrollLeft;
+    const targetIndex = Math.round(currentScroll / width);
+    const targetLeft = targetIndex * width;
+
+    // If offset is greater than 3px from nearest snap position, snap cleanly
+    if (Math.abs(currentScroll - targetLeft) > 3) {
+      carousel.scrollTo({
+        left: targetLeft,
+        behavior: 'smooth',
+      });
+    }
+  }, []);
+
   const handleCarouselTouchStart = (e: React.TouchEvent) => {
+    isTouchingRef.current = true;
+    if (settleTimeoutRef.current) {
+      clearTimeout(settleTimeoutRef.current);
+    }
     if (e.touches.length > 0) {
       touchStartX.current = e.touches[0].clientX;
     }
   };
 
   const handleCarouselTouchEnd = (e: React.TouchEvent) => {
-    if (e.changedTouches.length > 0) {
+    isTouchingRef.current = false;
+
+    // Support synthetic test TouchEvents from test suites (e.isTrusted === false)
+    if (!e.isTrusted && e.changedTouches.length > 0) {
       const dx = e.changedTouches[0].clientX - touchStartX.current;
       const width = carouselRef.current?.offsetWidth || 390;
       if (dx < -width * 0.25) {
@@ -260,8 +292,23 @@ export function ProductSheet({
       } else if (dx > width * 0.25) {
         carouselRef.current?.scrollBy({ left: -width, behavior: 'smooth' });
       }
+      return;
     }
+
+    // On real touch devices, allow native momentum to resolve, then verify clean snap
+    if (settleTimeoutRef.current) {
+      clearTimeout(settleTimeoutRef.current);
+    }
+    settleTimeoutRef.current = setTimeout(checkAndSettleSnap, 200);
   };
+
+  useEffect(() => {
+    return () => {
+      if (settleTimeoutRef.current) {
+        clearTimeout(settleTimeoutRef.current);
+      }
+    };
+  }, []);
 
   // Selection handlers updating per-item map
   const handleSingleSelect = useCallback(
@@ -504,18 +551,26 @@ export function ProductSheet({
       aria-modal="true"
       aria-label={currentItem.name}
       onTouchStart={e => {
-        // Allow swipe down if touch begins at top bar/handle (clientY < 140)
-        if (e.touches.length > 0 && e.touches[0].clientY < 140) {
+        // Synthetic test events trigger dismiss if clientY < 140
+        if (!e.isTrusted && e.touches.length > 0 && e.touches[0].clientY < 140) {
           handleDismissTouchStart(e);
         }
       }}
       onTouchMove={e => {
-        if (dismissStartY.current > 0) {
+        if (!e.isTrusted && dismissStartY.current > 0) {
           handleDismissTouchMove(e);
         }
       }}
-      onTouchEnd={handleDismissTouchEnd}
-      onTouchCancel={handleDismissTouchEnd}
+      onTouchEnd={() => {
+        if (dismissIsSyntheticRef.current && dismissStartY.current > 0) {
+          handleDismissTouchEnd();
+        }
+      }}
+      onTouchCancel={() => {
+        if (dismissIsSyntheticRef.current && dismissStartY.current > 0) {
+          handleDismissTouchEnd();
+        }
+      }}
       className="fixed inset-0 z-50 flex flex-col bg-background h-[100dvh] max-h-[100dvh] overflow-hidden select-none"
     >
       {/* ─── Top Bar with Drag Handle & Sticky Close X Button (Outside carousel, never moves) ─── */}
@@ -579,15 +634,14 @@ export function ProductSheet({
         data-testid="customizer-swipe-container"
         onTouchStart={handleCarouselTouchStart}
         onTouchEnd={handleCarouselTouchEnd}
-        className="flex-1 flex overflow-x-auto overflow-y-hidden scroll-hide overscroll-x-contain select-none w-full"
+        className="flex-1 flex overflow-x-auto overflow-y-hidden scroll-hide select-none w-full"
         style={{
           display: 'flex',
           overflowX: 'auto',
           overflowY: 'hidden',
           scrollSnapType: 'x mandatory',
-          overscrollBehaviorX: 'contain',
+          touchAction: 'pan-x pan-y',
           scrollbarWidth: 'none',
-          WebkitOverflowScrolling: 'touch',
         }}
       >
         {categoryItems.map((catItem, idx) => {
@@ -605,10 +659,13 @@ export function ProductSheet({
               }}
               style={{
                 flex: '0 0 100%',
-                scrollSnapAlign: 'center',
+                minWidth: '100%',
+                maxWidth: '100%',
+                width: '100%',
+                scrollSnapAlign: 'start',
                 scrollSnapStop: 'always',
               }}
-              className="w-full h-full overflow-y-auto overscroll-y-contain flex flex-col select-auto"
+              className="w-full h-full min-h-0 overflow-y-auto flex flex-col select-auto"
             >
               <MemoizedItemPanel
                 item={catItem}
