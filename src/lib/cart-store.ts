@@ -31,6 +31,27 @@ export interface CartState {
 
 const SESSION_TABLE_KEY = 'gelafehaus-table';
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function generateUUID(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
 function storageKey(table: string) {
   return `gelafehaus-cart-${table || 'default'}`;
 }
@@ -122,10 +143,7 @@ export const useCartStore = create<CartState>((set, get) => {
     },
 
     addItem: item => {
-      const cartItemId =
-        typeof crypto !== 'undefined' && crypto.randomUUID
-          ? crypto.randomUUID()
-          : `item_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+      const cartItemId = generateUUID();
 
       set(state => {
         const existing = state.items.find(
@@ -169,11 +187,8 @@ export const useCartStore = create<CartState>((set, get) => {
 
     getIdempotencyKey: () => {
       const existing = get().idempotencyKey;
-      if (existing) return existing;
-      const newKey =
-        typeof crypto !== 'undefined' && crypto.randomUUID
-          ? crypto.randomUUID()
-          : `ord_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+      if (existing && UUID_REGEX.test(existing)) return existing;
+      const newKey = generateUUID();
       set({ idempotencyKey: newKey });
       return newKey;
     },

@@ -207,6 +207,7 @@ test.describe('4x Throttled CPU Mobile Verification (390px)', () => {
 
     const customerName = `Tester_${Date.now() % 10000}`;
     await page.getByLabel(/Your Name/i).fill(customerName);
+    await page.getByLabel(/Mobile Number/i).fill('9876543210');
 
     const placeOrderBtn = page.getByRole('button', { name: /Place Order/i });
     await placeOrderBtn.click();

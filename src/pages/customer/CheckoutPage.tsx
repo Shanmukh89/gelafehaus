@@ -6,9 +6,45 @@ import { placeOrder } from '../../lib/api';
 import Button from '../../components/ui/Button';
 import Input from '../../components/ui/Input';
 import OfflineBanner from '../../components/ui/OfflineBanner';
-import { ArrowLeft, Info, ShoppingBag } from 'lucide-react';
+import { ArrowLeft, Info, ShoppingBag, X } from 'lucide-react';
 import { useToast } from '../../components/ui/useToast';
 import { useTurnstile } from '../../hooks/useTurnstile';
+
+function mapFriendlyOrderError(step: string, code: string | undefined, rawMsg: string): string {
+  if (step === 'validate') return rawMsg;
+
+  const detail = rawMsg.replace(/^[A-Z0-9_]+:\s*/, '');
+  switch (code) {
+    case 'RATE_LIMIT_EXCEEDED':
+      return 'Too many order attempts right now. Please wait a minute and try again.';
+    case 'BOT_VERIFICATION_FAILED':
+      return 'Security verification failed. Please refresh the page and try again.';
+    case 'INVALID_TABLE':
+      return 'This table is unavailable or invalid. Please re-scan your table QR code.';
+    case 'INVALID_CUSTOMER_NAME':
+      return 'Please enter a valid name (1–60 characters).';
+    case 'INVALID_PHONE':
+      return 'Please enter a valid 10-digit Indian mobile number.';
+    case 'ITEM_UNAVAILABLE':
+    case 'ITEM_NOT_FOUND':
+    case 'OFFER_EXPIRED':
+    case 'MISSING_REQUIRED_OPTION':
+    case 'OPTION_UNAVAILABLE':
+    case 'INVALID_OPTION_COUNT':
+    case 'MAX_OPTIONS_EXCEEDED':
+    case 'INVALID_OPTION_FOR_ITEM':
+      return detail;
+    case 'INVALID_ITEMS':
+    case 'INVALID_ITEM_ID':
+    case 'INVALID_QUANTITY':
+      return 'Your cart has an invalid item or quantity. Please review your cart and try again.';
+    default:
+      if (rawMsg === 'timeout' || rawMsg.toLowerCase().includes('unable to reach order service')) {
+        return 'Connection timed out. Please check your internet and try again.';
+      }
+      return 'We could not place your order right now. Please try again or ask a staff member for help.';
+  }
+}
 
 export default function CheckoutPage() {
   const [searchParams] = useSearchParams();
@@ -25,8 +61,17 @@ export default function CheckoutPage() {
 
   const [name, setName] = useState('');
   const [nameError, setNameError] = useState('');
+  const [phone, setPhone] = useState('');
+  const [phoneError, setPhoneError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [orderError, setOrderError] = useState<{
+    step: string;
+    message: string;
+    code?: string;
+    rawMessage: string;
+  } | null>(null);
   const nameInputId = useId();
+  const phoneInputId = useId();
   const { executeTurnstile } = useTurnstile();
 
   if (items.length === 0) {
@@ -47,20 +92,47 @@ export default function CheckoutPage() {
 
   async function handlePlaceOrder(e: React.FormEvent) {
     e.preventDefault();
+    let step = 'validate';
 
-    if (!name.trim()) {
-      setNameError('Please enter your name');
-      return;
-    }
-    setNameError('');
-
-    setLoading(true);
     try {
-      const turnstileToken = await executeTurnstile();
+      // ── Step: validate ──
+      if (!effectiveTable) {
+        throw new Error('Table number is missing. Please scan your table QR code.');
+      }
 
-      // Send ONLY item IDs, option IDs, and quantities (server-side price validation)
+      if (!name.trim()) {
+        setNameError('Please enter your name');
+        throw new Error('Please enter your name');
+      }
+      setNameError('');
+
+      const cleanPhone = phone.replace(/\D/g, '');
+      if (!/^[6-9]\d{9}$/.test(cleanPhone)) {
+        setPhoneError('Enter a valid 10-digit Indian mobile number');
+        throw new Error('Enter a valid 10-digit Indian mobile number');
+      }
+      setPhoneError('');
+
+      const sessionTable = sessionStorage.getItem('gelafehaus-table');
+      if (!sessionTable) {
+        throw new Error('Session table number is missing (sessionStorage empty). Please re-scan your table QR code.');
+      }
+
+      setLoading(true);
+      setOrderError(null);
+
+      // ── Step: token ──
+      step = 'token';
+      const turnstileToken = await executeTurnstile();
+      if (!turnstileToken) {
+        throw new Error('Turnstile did not return a token.');
+      }
+
+      // ── Step: request ──
+      step = 'request';
       const payload = {
         customerName: name.trim(),
+        customerPhone: `+91${cleanPhone}`,
         tableNumber: effectiveTable,
         turnstileToken,
         items: items.map(item => ({
@@ -72,13 +144,44 @@ export default function CheckoutPage() {
         })),
       };
 
+      // ── Step: response ──
+      step = 'response';
       const order = await placeOrder(payload);
+
+      if (!order || !order.id) {
+        throw new Error('Server returned an empty or invalid order object.');
+      }
+
+      // ── Step: session ──
+      step = 'session';
       clearCart();
       toast('Order placed successfully!', 'success');
       navigate(`/confirmation?orderId=${order.id}&table=${effectiveTable}`);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Failed to place order';
-      toast(msg, 'error');
+      const errObj = err as {
+        message?: string;
+        code?: string;
+        details?: unknown;
+        hint?: string;
+        status?: number;
+        responseBody?: unknown;
+      };
+      const rawMsg = err instanceof Error ? err.message : String(err);
+      const errCode = errObj?.code;
+      console.error('[PlaceOrder] FAILED:', {
+        step,
+        message: rawMsg,
+        code: errCode,
+        details: errObj?.details,
+        hint: errObj?.hint,
+        status: errObj?.status,
+        responseBody: errObj?.responseBody,
+        error: err,
+      });
+
+      const friendlyMsg = mapFriendlyOrderError(step, errCode, rawMsg);
+      setOrderError({ step, message: friendlyMsg, code: errCode, rawMessage: rawMsg });
+      toast(friendlyMsg, 'error');
     } finally {
       setLoading(false);
     }
@@ -87,6 +190,32 @@ export default function CheckoutPage() {
   return (
     <div className="min-h-screen bg-background pb-12">
       <OfflineBanner />
+
+      {/* ── Persistent Order Error Banner ── */}
+      {orderError && (
+        <div
+          role="alert"
+          className="sticky top-0 z-50 bg-red-600 text-white px-4 py-3 shadow-lg"
+        >
+          <div className="max-w-md mx-auto flex items-start gap-3">
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-bold">
+                Could not place your order
+              </p>
+              <p className="text-xs mt-0.5 opacity-90 break-words">
+                {orderError.message}
+              </p>
+            </div>
+            <button
+              onClick={() => setOrderError(null)}
+              className="shrink-0 mt-0.5 p-0.5 hover:bg-red-700 rounded transition-colors cursor-pointer"
+              aria-label="Dismiss error"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Header */}
       <header className="sticky top-0 z-30 bg-background/95 backdrop-blur-sm border-b border-border">
@@ -105,7 +234,7 @@ export default function CheckoutPage() {
       </header>
 
       <main className="max-w-md mx-auto px-4 pt-6">
-        <form onSubmit={handlePlaceOrder} className="space-y-6">
+        <form onSubmit={handlePlaceOrder} noValidate className="space-y-6">
           {/* Customer & Table details */}
           <div className="bg-surface rounded-[var(--radius-card)] p-5 border border-border shadow-[var(--shadow-sm)] space-y-4">
             <h2 className="text-base font-heading font-semibold text-ink">Your Details</h2>
@@ -124,6 +253,42 @@ export default function CheckoutPage() {
                 autoFocus
                 required
               />
+            </div>
+
+            <div>
+              <label htmlFor={phoneInputId} className="text-sm font-medium text-ink block mb-1.5">
+                Mobile Number *
+              </label>
+              <div className="flex">
+                <span className="inline-flex items-center px-3 h-11 text-sm font-semibold bg-background text-ink border border-r-0 border-border rounded-l-[var(--radius-input)] select-none">
+                  +91
+                </span>
+                <input
+                  id={phoneInputId}
+                  type="tel"
+                  inputMode="numeric"
+                  maxLength={10}
+                  placeholder="9876543210"
+                  value={phone}
+                  onChange={e => {
+                    const digits = e.target.value.replace(/\D/g, '').slice(0, 10);
+                    setPhone(digits);
+                    if (phoneError) setPhoneError('');
+                  }}
+                  required
+                  className={`
+                    h-11 px-3 text-sm bg-surface text-ink placeholder:text-muted
+                    border rounded-r-[var(--radius-input)] w-full
+                    focus:outline-none focus:ring-2 focus:ring-primary/20 transition-colors
+                    ${phoneError ? 'border-danger focus:border-danger' : 'border-border focus:border-primary'}
+                  `}
+                />
+              </div>
+              {phoneError && (
+                <p className="text-xs text-danger mt-1" role="alert">
+                  {phoneError}
+                </p>
+              )}
             </div>
 
             <div>

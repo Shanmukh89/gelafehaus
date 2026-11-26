@@ -1,4 +1,4 @@
-import { supabase } from './supabase';
+import { supabase, isSupabaseConfigured } from './supabase';
 
 export async function signInAdmin(
   email: string,
@@ -11,8 +11,8 @@ export async function signInAdmin(
     });
 
     if (error) {
-      // In demo or fallback mode without Supabase running
-      if (email === 'manager@gelafehaus.com' || email.includes('@')) {
+      // Only allow demo fallback when Supabase is not configured (offline/local dev)
+      if (!isSupabaseConfigured && (email === 'manager@gelafehaus.com' || email.includes('@'))) {
         sessionStorage.setItem('gelafehaus-admin-auth', 'true');
         return { success: true };
       }
@@ -52,18 +52,20 @@ export async function checkAdminSession(): Promise<boolean> {
   try {
     const { data: { session } } = await supabase.auth.getSession();
     if (!session) {
-      // Fall back to local session flag for offline/demo
-      return sessionStorage.getItem('gelafehaus-admin-auth') === 'true';
+      // Fall back to local session flag only when Supabase is not configured
+      return !isSupabaseConfigured && sessionStorage.getItem('gelafehaus-admin-auth') === 'true';
     }
 
     const { data: isAdmin } = await supabase.rpc('is_admin');
     const valid = Boolean(isAdmin);
     if (valid) {
       sessionStorage.setItem('gelafehaus-admin-auth', 'true');
+    } else {
+      sessionStorage.removeItem('gelafehaus-admin-auth');
     }
     return valid;
   } catch {
-    return sessionStorage.getItem('gelafehaus-admin-auth') === 'true';
+    return !isSupabaseConfigured && sessionStorage.getItem('gelafehaus-admin-auth') === 'true';
   }
 }
 

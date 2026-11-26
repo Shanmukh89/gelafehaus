@@ -2,23 +2,27 @@
 // Implements real Supabase database, RPC, and Realtime calls.
 // Preserves every function signature and return type so UI components remain unchanged.
 
-import { supabase } from './supabase';
+import { supabase, isSupabaseConfigured, isProductionMissingConfig } from './supabase';
 import type {
   MenuItem,
   Order,
   OrderLineItem,
   SelectedOption,
   OrderStatus,
+  PaymentMethod,
+  PaymentStatus,
+  PaymentHistoryEntry,
   PlaceOrderPayload,
   DayStats,
   MenuCategory,
   OptionGroup,
   Offer,
+  InsightsRange,
+  InsightsData,
 } from './types';
 import { getOfferStatus } from './types';
 import { menuItems as seedMenu } from './menu-data';
 import { useCartStore } from './cart-store';
-import { soundAlert } from './sound';
 import { padTableNumber } from './utils';
 
 // ─── Local in-memory fallback state (used if backend is unreachable) ───
@@ -43,18 +47,27 @@ function saveStoredFallbackOrders(orders: Order[]) {
 
 // ─── Lightweight Dev Server Cross-Device Sync ───
 // Enables phone (customer) and laptop (admin) on the same Wi-Fi network
-// to share orders in real time even when running without Docker/Supabase.
-function syncOrderToDevServer(order: Order) {
-  if (typeof window === 'undefined') return;
-  fetch('/_dev_sync/orders', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(order),
-  }).catch(() => {});
+// to share live orders & sequential daily numbers in DEV mode when Supabase isn't running.
+async function syncOrderToDevServer(order: Order): Promise<Order | null> {
+  if (typeof window === 'undefined' || !import.meta.env.DEV) return null;
+  try {
+    const res = await fetch('/_dev_sync/orders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(order),
+    });
+    if (res.ok) {
+      const json = await res.json();
+      if (json?.order) return json.order as Order;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
 }
 
 async function fetchOrdersFromDevServer(): Promise<Order[] | null> {
-  if (typeof window === 'undefined') return null;
+  if (typeof window === 'undefined' || !import.meta.env.DEV) return null;
   try {
     const res = await fetch('/_dev_sync/orders');
     if (res.ok) {
@@ -105,48 +118,140 @@ function saveStoredFallbackOffers(offers: import('./types').Offer[]) {
   }
 }
 
+const ALLOW_DEV_FALLBACK = import.meta.env.DEV;
+
 let fallbackMenu: MenuItem[] = getStoredFallbackMenu();
 let fallbackOrders: Order[] = getStoredFallbackOrders();
 let fallbackOffers: import('./types').Offer[] = getStoredFallbackOffers();
-let nextFallbackOrderNumber = 101;
+
+function isNetworkOrUnreachableError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if (err.name === 'FunctionsFetchError') return true;
+  const msg = err.message.toLowerCase();
+  return (
+    msg.includes('failed to fetch') ||
+    msg.includes('failed to send a request to the edge function') ||
+    msg === 'timeout' ||
+    msg.includes('load failed') ||
+    msg.includes('networkerror') ||
+    msg.includes('connection refused') ||
+    msg.includes('err_connection')
+  );
+}
+
+export function normalizeIndianPhone(raw: string): string | null {
+  const cleaned = raw.trim().replace(/^(\+91|91)?[\s-]*/, '').replace(/[\s-]/g, '');
+  if (/^[6-9]\d{9}$/.test(cleaned)) {
+    return `+91${cleaned}`;
+  }
+  return null;
+}
 
 // ─── Global Realtime Subscription for Admin ───
 let adminRealtimeSubscribed = false;
 
+export type RealtimeStatus = 'live' | 'reconnecting';
+
+export function subscribeAdminRealtime(
+  onOrderEvent: (event: { type: 'insert' | 'update'; orderId?: string }) => void,
+  onStatusChange?: (status: RealtimeStatus) => void
+): () => void {
+  if (typeof window === 'undefined') return () => {};
+
+  let devSource: EventSource | null = null;
+  let devSyncConnected = false;
+
+  // 1. Supabase Realtime single channel for orders (INSERT, UPDATE) & order_items
+  const channel = supabase
+    .channel('admin_live_orders')
+    .on(
+      'postgres_changes',
+      { event: 'INSERT', schema: 'public', table: 'orders' },
+      payload => {
+        const orderId = (payload.new as { id?: string })?.id;
+        onOrderEvent({ type: 'insert', orderId });
+      }
+    )
+    .on(
+      'postgres_changes',
+      { event: 'UPDATE', schema: 'public', table: 'orders' },
+      payload => {
+        const orderId = (payload.new as { id?: string })?.id;
+        onOrderEvent({ type: 'update', orderId });
+      }
+    )
+    .on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table: 'order_items' },
+      payload => {
+        const orderId =
+          (payload.new as { order_id?: string })?.order_id ||
+          (payload.old as { order_id?: string })?.order_id;
+        onOrderEvent({ type: 'update', orderId });
+      }
+    )
+    .on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table: 'payments' },
+      payload => {
+        const orderId =
+          (payload.new as { order_id?: string })?.order_id ||
+          (payload.old as { order_id?: string })?.order_id;
+        onOrderEvent({ type: 'update', orderId });
+      }
+    )
+    .subscribe(status => {
+      if (status === 'SUBSCRIBED') {
+        onStatusChange?.('live');
+      } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+        if (!devSyncConnected) {
+          onStatusChange?.('reconnecting');
+        }
+      }
+    });
+
+  // 2. Dev-sync SSE stream for instant Wi-Fi / local dev updates (<100ms)
+  if (typeof EventSource !== 'undefined') {
+    try {
+      devSource = new EventSource('/_dev_sync/events');
+      devSource.onopen = () => {
+        devSyncConnected = true;
+        onStatusChange?.('live');
+      };
+      devSource.onmessage = evt => {
+        try {
+          const parsed = JSON.parse(evt.data);
+          if (parsed.type === 'connected') {
+            devSyncConnected = true;
+            onStatusChange?.('live');
+          } else if (parsed.type === 'order_inserted') {
+            onOrderEvent({ type: 'insert', orderId: parsed.orderId });
+          } else if (parsed.type === 'order_updated') {
+            onOrderEvent({ type: 'update', orderId: parsed.orderId });
+          }
+        } catch {
+          // ignore
+        }
+      };
+      devSource.onerror = () => {
+        devSyncConnected = false;
+      };
+    } catch {
+      // ignore if SSE unsupported
+    }
+  }
+
+  return () => {
+    supabase.removeChannel(channel);
+    if (devSource) {
+      devSource.close();
+    }
+  };
+}
+
 function setupAdminRealtime() {
   if (adminRealtimeSubscribed || typeof window === 'undefined') return;
   adminRealtimeSubscribed = true;
-
-  try {
-    supabase
-      .channel('admin_live_orders')
-      .on(
-        'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'orders' },
-        (payload) => {
-          soundAlert.playChime();
-          window.dispatchEvent(
-            new CustomEvent('gelafehaus:new_order', { detail: payload.new })
-          );
-        }
-      )
-      .on(
-        'postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'orders' },
-        (payload) => {
-          window.dispatchEvent(
-            new CustomEvent('gelafehaus:order_updated', { detail: payload.new })
-          );
-        }
-      )
-      .subscribe((status) => {
-        if (status === 'CHANNEL_ERROR') {
-          console.warn('Realtime subscription error. Polling fallback active.');
-        }
-      });
-  } catch (err) {
-    console.warn('Failed to initialize admin realtime channel:', err);
-  }
 }
 
 // ─── Table Validation API ───
@@ -170,8 +275,9 @@ export async function validateTable(
       .eq('number', padded)
       .maybeSingle();
 
+    const timeoutMs = isSupabaseConfigured ? 8000 : 1200;
     const timeout = new Promise<{ data: null; error: Error }>((resolve) =>
-      setTimeout(() => resolve({ data: null, error: new Error('Timeout') }), 1200)
+      setTimeout(() => resolve({ data: null, error: new Error('Timeout') }), timeoutMs)
     );
 
     const { data, error } = await Promise.race([query, timeout]);
@@ -182,11 +288,24 @@ export async function validateTable(
         tableNumber: data.number,
       };
     }
+    if (!error && !data && !ALLOW_DEV_FALLBACK) {
+      return { valid: false, tableNumber: padded };
+    }
+    if (error && !ALLOW_DEV_FALLBACK) {
+      throw new Error(error.message);
+    }
   } catch (err) {
-    console.warn('Supabase table lookup error, checking fallback:', err);
+    if (!ALLOW_DEV_FALLBACK) {
+      throw err;
+    }
+    console.warn('Supabase table lookup error, checking dev fallback:', err);
   }
 
-  // Fallback for offline / local mode (tables 01-15 are active)
+  if (!ALLOW_DEV_FALLBACK) {
+    return { valid: false, tableNumber: padded };
+  }
+
+  // Fallback for offline / dev mode (tables 01-15 are active)
   const num = parseInt(padded, 10);
   const isValid = !isNaN(num) && num >= 1 && num <= 15;
   return {
@@ -218,6 +337,7 @@ export async function getMenu(includeDeleted: boolean = false): Promise<MenuItem
           price_paise,
           is_available,
           sort_order,
+          deleted_at,
           option_groups (
             id,
             menu_item_id,
@@ -237,16 +357,20 @@ export async function getMenu(includeDeleted: boolean = false): Promise<MenuItem
       `)
       .order('sort_order', { ascending: true });
 
+    const timeoutMs = isSupabaseConfigured ? 8000 : 1200;
     const timeout = new Promise<{ data: null; error: Error }>((resolve) =>
-      setTimeout(() => resolve({ data: null, error: new Error('Timeout') }), 1200)
+      setTimeout(() => resolve({ data: null, error: new Error('Timeout') }), timeoutMs)
     );
 
-    const { data: categories, error } = await Promise.race([query, timeout]);
+    const [{ data: categories, error }, liveOffers] = await Promise.all([
+      Promise.race([query, timeout]),
+      getOffers().catch(() => fallbackOffers),
+    ]);
 
     // Helper to attach active offers to menu items
     const attachOffers = (itemList: MenuItem[]) => {
       return itemList.map(it => {
-        const activeOffer = fallbackOffers.find(
+        const activeOffer = liveOffers.find(
           o => o.menuItemId === it.id && getOfferStatus(o) === 'active'
         );
         return {
@@ -257,6 +381,9 @@ export async function getMenu(includeDeleted: boolean = false): Promise<MenuItem
     };
 
     if (error || !categories || categories.length === 0) {
+      if (!ALLOW_DEV_FALLBACK) {
+        throw new Error(error?.message || 'Failed to load menu');
+      }
       if (error) console.warn('Supabase getMenu query warning, using local menu:', error.message);
       const activeFallback = includeDeleted ? fallbackMenu : fallbackMenu.filter(m => !m.deletedAt);
       const withOffers = attachOffers(activeFallback);
@@ -307,7 +434,10 @@ export async function getMenu(includeDeleted: boolean = false): Promise<MenuItem
     useCartStore.getState().validateCart(withOffers);
     return withOffers;
   } catch (err) {
-    console.warn('getMenu error, using fallback:', err);
+    if (!ALLOW_DEV_FALLBACK) {
+      throw err;
+    }
+    console.warn('getMenu error, using dev fallback:', err);
     const activeFallback = (includeDeleted ? fallbackMenu : fallbackMenu.filter(m => !m.deletedAt)).map(it => {
       const activeOffer = fallbackOffers.find(
         o => o.menuItemId === it.id && getOfferStatus(o) === 'active'
@@ -676,6 +806,30 @@ export async function addMenuItem(item: Omit<MenuItem, 'id'>): Promise<MenuItem>
 
 // ─── Orders API ───
 
+export interface PlaceOrderError extends Error {
+  code?: string;
+  details?: unknown;
+  hint?: string;
+  status?: number;
+  responseBody?: unknown;
+}
+
+function buildPlaceOrderError(
+  rawMessage: string,
+  extra: Omit<PlaceOrderError, 'name' | 'message'> = {}
+): PlaceOrderError {
+  const codeMatch = rawMessage.match(/^([A-Z0-9_]+):\s*(.*)$/);
+  const code = extra.code || (codeMatch ? codeMatch[1] : undefined);
+  const err = new Error(rawMessage) as PlaceOrderError;
+  err.name = 'PlaceOrderError';
+  if (code) err.code = code;
+  if (extra.details !== undefined) err.details = extra.details;
+  if (extra.hint !== undefined) err.hint = extra.hint;
+  if (extra.status !== undefined) err.status = extra.status;
+  if (extra.responseBody !== undefined) err.responseBody = extra.responseBody;
+  return err;
+}
+
 /**
  * placeOrder: Calls the Supabase Edge Function 'place-order',
  * which verifies Cloudflare Turnstile token, applies rate limiting,
@@ -684,16 +838,31 @@ export async function addMenuItem(item: Omit<MenuItem, 'id'>): Promise<MenuItem>
 export async function placeOrder(
   payload: PlaceOrderPayload & { turnstileToken?: string }
 ): Promise<Order> {
+  if (isProductionMissingConfig) {
+    throw new Error('Order service is not configured. Missing production Supabase environment variables.');
+  }
+
+  if (!payload.tableNumber || !payload.tableNumber.trim()) {
+    throw new Error('INVALID_TABLE: Table number is missing. Please scan your table QR code.');
+  }
+
+  const normalizedPhone = normalizeIndianPhone(payload.customerPhone || '');
+  if (!normalizedPhone) {
+    throw new Error('INVALID_PHONE: Please enter a valid 10-digit Indian mobile number.');
+  }
+
   const idempotencyKey = useCartStore.getState().getIdempotencyKey();
 
   try {
+    const rpcTimeoutMs = isSupabaseConfigured ? 10000 : 1200;
     const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('timeout')), 1200)
+      setTimeout(() => reject(new Error('timeout')), rpcTimeoutMs)
     );
     const invokePromise = supabase.functions.invoke('place-order', {
       body: {
         tableNumber: payload.tableNumber,
         customerName: payload.customerName,
+        customerPhone: normalizedPhone,
         items: payload.items,
         idempotencyKey,
         turnstileToken: payload.turnstileToken || null,
@@ -703,29 +872,88 @@ export async function placeOrder(
     const { data, error } = await Promise.race([invokePromise, timeoutPromise]);
 
     if (error) {
-      let message = error.message || 'Failed to place order';
-      if (message.includes(': ')) {
-        message = message.substring(message.indexOf(': ') + 2);
+      let rawMessage = error.message || 'Failed to place order';
+      let status: number | undefined;
+      let responseBody: unknown;
+      let code: string | undefined;
+      let details: unknown;
+      let hint: string | undefined;
+
+      const ctx = (error as {
+        context?: {
+          status?: number;
+          clone?: () => Response;
+          text?: () => Promise<string>;
+        };
+      }).context;
+      if (ctx) {
+        status = ctx.status;
+        try {
+          const reader = typeof ctx.clone === 'function' ? ctx.clone() : ctx;
+          const text = typeof reader.text === 'function' ? await reader.text() : '';
+          if (text) {
+            try {
+              const parsed = JSON.parse(text);
+              responseBody = parsed;
+              if (parsed?.error) rawMessage = String(parsed.error);
+              if (parsed?.code) code = String(parsed.code);
+              if (parsed?.details) details = parsed.details;
+              if (parsed?.hint) hint = String(parsed.hint);
+            } catch {
+              responseBody = text;
+            }
+          }
+        } catch {
+          // keep original error message if body cannot be read
+        }
       }
-      throw new Error(message);
+
+      const fullError = buildPlaceOrderError(rawMessage, {
+        code,
+        details,
+        hint,
+        status,
+        responseBody,
+      });
+      fullError.name = error.name || 'PlaceOrderError';
+      console.error('[placeOrder] Edge Function error:', {
+        message: fullError.message,
+        code: fullError.code,
+        details: fullError.details,
+        hint: fullError.hint,
+        status: fullError.status,
+        responseBody: fullError.responseBody,
+        rawError: error,
+      });
+      throw fullError;
     }
 
     if (data?.error) {
-      let message = data.error;
-      if (message.includes(': ')) {
-        message = message.substring(message.indexOf(': ') + 2);
-      }
-      throw new Error(message);
+      const rawMessage = String(data.error);
+      const fullError = buildPlaceOrderError(rawMessage, {
+        code: data.code,
+        details: data.details,
+        hint: data.hint,
+        responseBody: data,
+      });
+      console.error('[placeOrder] Response data.error:', {
+        message: fullError.message,
+        code: fullError.code,
+        details: fullError.details,
+        hint: fullError.hint,
+        responseBody: fullError.responseBody,
+      });
+      throw fullError;
     }
 
-    if (data && data.order_id) {
-      // Order placed successfully: reset the idempotency key!
+    if (data && data.order_id && typeof data.order_number === 'number') {
       useCartStore.getState().resetIdempotencyKey();
 
       return {
         id: data.order_id,
         orderNumber: data.order_number,
         customerName: payload.customerName,
+        customerPhone: normalizedPhone,
         tableNumber: payload.tableNumber,
         items: payload.items.map(i => ({
           menuItemId: i.menuItemId,
@@ -736,25 +964,27 @@ export async function placeOrder(
         })),
         total: data.total_paise,
         status: data.status || 'received',
+        paymentStatus: 'unpaid',
+        paymentHistory: [],
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
     }
+
+    throw new Error('Unexpected empty response from order service.');
   } catch (err: unknown) {
-    if (
-      err instanceof Error &&
-      err.message.length > 0 &&
-      !err.message.includes('fetch') &&
-      !err.message.includes('Failed to send a request') &&
-      !err.message.includes('timeout')
-    ) {
+    if (!ALLOW_DEV_FALLBACK || !isNetworkOrUnreachableError(err)) {
+      if (isNetworkOrUnreachableError(err)) {
+        throw new Error('Unable to reach order service. Please check your connection and try again.');
+      }
       throw err;
     }
-    console.warn('Supabase Edge Function place-order unreachable, using fallback simulation:', err);
+    console.warn('DEV ONLY: Supabase Edge Function place-order unreachable, using dev-sync fallback:', err);
   }
 
-  // Fallback simulation (server-side validation of availability, soft-deletes, options, and live offers)
+  // DEV-ONLY fallback simulation (never reachable in production builds)
   const now = new Date().toISOString();
+  const today = now.split('T')[0];
   let calculatedTotal = 0;
   const orderItems: OrderLineItem[] = [];
 
@@ -819,31 +1049,52 @@ export async function placeOrder(
     });
   }
 
-  const order: Order = {
+  // Fallback counter only if dev-sync endpoint is unavailable (never reset to hardcoded 101)
+  fallbackOrders = getStoredFallbackOrders();
+  const maxToday = fallbackOrders
+    .filter(o => o.createdAt.startsWith(today))
+    .reduce((max, o) => Math.max(max, o.orderNumber || 100), 100);
+
+  const draftOrder: Order & { idempotencyKey?: string } = {
     id: crypto.randomUUID(),
-    orderNumber: nextFallbackOrderNumber++,
+    orderNumber: maxToday + 1,
     customerName: payload.customerName,
+    customerPhone: normalizedPhone,
     tableNumber: payload.tableNumber,
     items: orderItems,
     total: calculatedTotal,
     status: 'received',
+    paymentStatus: 'unpaid',
+    paymentHistory: [],
     createdAt: now,
     updatedAt: now,
+    idempotencyKey,
   };
-  fallbackOrders.unshift(order);
+
+  // Dev server assigns concurrency-safe sequential daily order number (101, 102, 103...)
+  const serverAssigned = await syncOrderToDevServer(draftOrder);
+  const finalOrder: Order = serverAssigned || draftOrder;
+
+  if (!fallbackOrders.some(o => o.id === finalOrder.id)) {
+    fallbackOrders.unshift(finalOrder);
+  }
   saveStoredFallbackOrders(fallbackOrders);
-  syncOrderToDevServer(order);
   useCartStore.getState().resetIdempotencyKey();
-  return order;
+  return finalOrder;
 }
 
 /**
  * getOrder: Customer order lookup via rpc('get_order_status').
  */
 export async function getOrder(orderId: string): Promise<Order | null> {
+  if (isProductionMissingConfig) {
+    throw new Error('Order service is not configured.');
+  }
+
   try {
+    const rpcTimeoutMs = isSupabaseConfigured ? 8000 : 1200;
     const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('timeout')), 1200)
+      setTimeout(() => reject(new Error('timeout')), rpcTimeoutMs)
     );
     const rpcPromise = supabase.rpc('get_order_status', {
       p_order_id: orderId,
@@ -851,7 +1102,11 @@ export async function getOrder(orderId: string): Promise<Order | null> {
 
     const { data, error } = await Promise.race([rpcPromise, timeoutPromise]);
 
-    if (!error && data && data.length > 0) {
+    if (error) {
+      throw new Error(error.message || 'Failed to fetch order');
+    }
+
+    if (data && data.length > 0) {
       const row = data[0];
       const items = (typeof row.items === 'string' ? JSON.parse(row.items) : row.items) || [];
 
@@ -879,9 +1134,16 @@ export async function getOrder(orderId: string): Promise<Order | null> {
         updatedAt: new Date().toISOString(),
       };
     }
+
+    if (!ALLOW_DEV_FALLBACK) return null;
   } catch (err) {
-    console.warn('getOrder RPC error, checking fallback:', err);
+    if (!ALLOW_DEV_FALLBACK || !isNetworkOrUnreachableError(err)) {
+      throw err;
+    }
+    console.warn('getOrder RPC error, checking dev fallback:', err);
   }
+
+  if (!ALLOW_DEV_FALLBACK) return null;
 
   const serverOrders = await fetchOrdersFromDevServer();
   if (serverOrders) {
@@ -894,78 +1156,155 @@ export async function getOrder(orderId: string): Promise<Order | null> {
   return order ? { ...order } : null;
 }
 
+function mapSupabaseOrderRow(o: any): Order {
+  return {
+    id: o.id,
+    orderNumber: o.order_number,
+    customerName: o.customer_name,
+    customerPhone: o.customer_phone || undefined,
+    tableNumber: o.tables?.number || '',
+    status: o.status as OrderStatus,
+    paymentStatus: (o.payment_status as PaymentStatus) || 'unpaid',
+    paidAt: o.paid_at || undefined,
+    paymentMethod: (o.payment_method as PaymentMethod) || undefined,
+    paymentHistory: Array.isArray(o.payment_history)
+      ? o.payment_history.map((h: any) => ({
+          action: h.action,
+          method: h.method,
+          previousMethod: h.previous_method,
+          timestamp: h.timestamp,
+        }))
+      : [],
+    rejectionReason: o.reject_reason || undefined,
+    total: o.total_paise,
+    createdAt: o.created_at,
+    updatedAt: o.updated_at,
+    items: (o.order_items || []).map((oi: any) => ({
+      menuItemId: oi.menu_item_id || '',
+      name: oi.name_snapshot,
+      quantity: oi.quantity,
+      lineTotal: oi.unit_price_paise * oi.quantity,
+      options: (oi.order_item_options || []).map((opt: any) => ({
+        groupId: '',
+        groupName: '',
+        optionId: opt.id,
+        optionName: opt.name_snapshot,
+        price: opt.price_paise,
+      })),
+    })),
+  };
+}
+
+const ADMIN_ORDER_SELECT = `
+  id,
+  order_number,
+  order_date,
+  customer_name,
+  customer_phone,
+  status,
+  payment_status,
+  paid_at,
+  payment_method,
+  payment_history,
+  reject_reason,
+  total_paise,
+  created_at,
+  updated_at,
+  tables ( number ),
+  order_items (
+    id,
+    menu_item_id,
+    name_snapshot,
+    unit_price_paise,
+    quantity,
+    notes,
+    order_item_options (
+      id,
+      name_snapshot,
+      price_paise
+    )
+  )
+`;
+
+/**
+ * getOrderWithItems: Fetch a single full order with all line items & options (used on realtime events).
+ */
+export async function getOrderWithItems(orderId: string): Promise<Order | null> {
+  try {
+    const timeoutMs = isSupabaseConfigured ? 8000 : 1500;
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('timeout')), timeoutMs)
+    );
+    const fetchPromise = supabase
+      .from('orders')
+      .select(ADMIN_ORDER_SELECT)
+      .eq('id', orderId)
+      .maybeSingle();
+
+    const { data, error } = await Promise.race([fetchPromise, timeoutPromise]);
+    if (error) {
+      throw new Error(error.message || 'Failed to fetch order');
+    }
+    if (data) {
+      return mapSupabaseOrderRow(data);
+    }
+    if (!ALLOW_DEV_FALLBACK) return null;
+  } catch (err) {
+    if (!ALLOW_DEV_FALLBACK || !isNetworkOrUnreachableError(err)) {
+      throw err;
+    }
+  }
+
+  if (!ALLOW_DEV_FALLBACK) return null;
+
+  const serverOrders = await fetchOrdersFromDevServer();
+  if (serverOrders) {
+    const found = serverOrders.find(o => o.id === orderId);
+    if (found) return { ...found };
+  }
+
+  fallbackOrders = getStoredFallbackOrders();
+  const found = fallbackOrders.find(o => o.id === orderId);
+  return found ? { ...found } : null;
+}
+
 /**
  * getOrders: Admin query for today's live orders with items and options.
  */
 export async function getOrders(): Promise<Order[]> {
+  if (isProductionMissingConfig) {
+    throw new Error('Order service is not configured. Missing production Supabase environment variables.');
+  }
   setupAdminRealtime();
 
   try {
     const today = new Date().toISOString().split('T')[0];
+    const timeoutMs = isSupabaseConfigured ? 8000 : 1200;
     const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('timeout')), 1200)
+      setTimeout(() => reject(new Error('timeout')), timeoutMs)
     );
     const fetchPromise = supabase
       .from('orders')
-      .select(`
-        id,
-        order_number,
-        order_date,
-        customer_name,
-        status,
-        reject_reason,
-        total_paise,
-        created_at,
-        updated_at,
-        tables ( number ),
-        order_items (
-          id,
-          menu_item_id,
-          name_snapshot,
-          unit_price_paise,
-          quantity,
-          notes,
-          order_item_options (
-            id,
-            name_snapshot,
-            price_paise
-          )
-        )
-      `)
+      .select(ADMIN_ORDER_SELECT)
       .eq('order_date', today)
       .order('created_at', { ascending: false });
 
     const { data, error } = await Promise.race([fetchPromise, timeoutPromise]);
 
-    if (!error && data) {
-      return data.map((o: any) => ({
-        id: o.id,
-        orderNumber: o.order_number,
-        customerName: o.customer_name,
-        tableNumber: o.tables?.number || '',
-        status: o.status as OrderStatus,
-        rejectionReason: o.reject_reason || undefined,
-        total: o.total_paise,
-        createdAt: o.created_at,
-        updatedAt: o.updated_at,
-        items: (o.order_items || []).map((oi: any) => ({
-          menuItemId: oi.menu_item_id || '',
-          name: oi.name_snapshot,
-          quantity: oi.quantity,
-          lineTotal: oi.unit_price_paise * oi.quantity,
-          options: (oi.order_item_options || []).map((opt: any) => ({
-            groupId: '',
-            groupName: '',
-            optionId: opt.id,
-            optionName: opt.name_snapshot,
-            price: opt.price_paise,
-          })),
-        })),
-      }));
+    if (error) {
+      throw new Error(error.message || 'Failed to load orders');
+    }
+    if (data) {
+      return data.map(mapSupabaseOrderRow);
     }
   } catch (err) {
-    console.warn('getOrders query error, using fallback:', err);
+    if (!ALLOW_DEV_FALLBACK || !isNetworkOrUnreachableError(err)) {
+      throw err;
+    }
+    console.warn('getOrders query error, using dev fallback:', err);
   }
+
+  if (!ALLOW_DEV_FALLBACK) return [];
 
   const serverOrders = await fetchOrdersFromDevServer();
   if (serverOrders && serverOrders.length > 0) {
@@ -995,13 +1334,11 @@ export async function updateOrderStatus(
 
     if (error) {
       let message = error.message || 'Failed to update order status';
-      if (message.includes(': ')) {
-        message = message.substring(message.indexOf(': ') + 2);
-      }
+      message = message.replace(/^[A-Z0-9_]+:\s*/, '');
       throw new Error(message);
     }
   } catch (err: unknown) {
-    if (err instanceof Error && !err.message.includes('fetch')) {
+    if (!ALLOW_DEV_FALLBACK || !isNetworkOrUnreachableError(err)) {
       throw err;
     }
     console.warn('updateOrderStatus RPC warning:', err);
@@ -1020,33 +1357,165 @@ export async function updateOrderStatus(
     order.updatedAt = new Date().toISOString();
     if (rejectionReason) order.rejectionReason = rejectionReason;
     saveStoredFallbackOrders(fallbackOrders);
-    syncOrderToDevServer(order);
+    await syncOrderToDevServer(order);
     return { ...order };
   }
 
-  return {
-    id: orderId,
-    orderNumber: 101,
-    customerName: 'Customer',
-    tableNumber: '',
-    status,
-    total: 24900,
-    items: [],
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  };
+  throw new Error('Order not found');
 }
 
 /**
- * getDayStats: Computed from today's orders.
+ * markOrderPaid: Admin-only confirmation that customer paid via Cash / UPI / Card.
+ */
+export async function markOrderPaid(
+  orderId: string,
+  method: PaymentMethod
+): Promise<Order> {
+  try {
+    const { error } = await supabase.rpc('mark_order_paid', {
+      p_order_id: orderId,
+      p_method: method,
+    });
+
+    if (error) {
+      throw new Error(error.message || 'Failed to mark order paid');
+    }
+
+    const updated = await getOrderWithItems(orderId);
+    if (updated) return updated;
+  } catch (err: unknown) {
+    if (!ALLOW_DEV_FALLBACK || !isNetworkOrUnreachableError(err)) {
+      throw err;
+    }
+  }
+
+  if (!ALLOW_DEV_FALLBACK) {
+    throw new Error('Unable to mark order paid in production without database connection.');
+  }
+
+  const serverOrders = await fetchOrdersFromDevServer();
+  if (serverOrders && serverOrders.length > 0) {
+    fallbackOrders = serverOrders;
+  } else {
+    fallbackOrders = getStoredFallbackOrders();
+  }
+
+  const idx = fallbackOrders.findIndex(o => o.id === orderId);
+  if (idx === -1) throw new Error('Order not found');
+
+  const now = new Date().toISOString();
+  const prevHistory: PaymentHistoryEntry[] = fallbackOrders[idx].paymentHistory || [];
+  fallbackOrders[idx] = {
+    ...fallbackOrders[idx],
+    paymentStatus: 'paid',
+    paidAt: now,
+    paymentMethod: method,
+    paymentHistory: [
+      ...prevHistory,
+      { action: 'paid', method, timestamp: now },
+    ],
+    updatedAt: now,
+  };
+  saveStoredFallbackOrders(fallbackOrders);
+  await syncOrderToDevServer(fallbackOrders[idx]);
+  return { ...fallbackOrders[idx] };
+}
+
+/**
+ * undoOrderPaid: Admin-only undo for mis-taps, logged in order paymentHistory.
+ */
+export async function undoOrderPaid(orderId: string): Promise<Order> {
+  try {
+    const { error } = await supabase.rpc('undo_order_paid', {
+      p_order_id: orderId,
+    });
+
+    if (error) {
+      throw new Error(error.message || 'Failed to undo payment');
+    }
+
+    const updated = await getOrderWithItems(orderId);
+    if (updated) return updated;
+  } catch (err: unknown) {
+    if (!ALLOW_DEV_FALLBACK || !isNetworkOrUnreachableError(err)) {
+      throw err;
+    }
+  }
+
+  if (!ALLOW_DEV_FALLBACK) {
+    throw new Error('Unable to undo payment in production without database connection.');
+  }
+
+  const serverOrders = await fetchOrdersFromDevServer();
+  if (serverOrders && serverOrders.length > 0) {
+    fallbackOrders = serverOrders;
+  } else {
+    fallbackOrders = getStoredFallbackOrders();
+  }
+
+  const idx = fallbackOrders.findIndex(o => o.id === orderId);
+  if (idx === -1) throw new Error('Order not found');
+
+  const now = new Date().toISOString();
+  const prevMethod = fallbackOrders[idx].paymentMethod;
+  const prevHistory: PaymentHistoryEntry[] = fallbackOrders[idx].paymentHistory || [];
+
+  fallbackOrders[idx] = {
+    ...fallbackOrders[idx],
+    paymentStatus: 'unpaid',
+    paidAt: undefined,
+    paymentMethod: undefined,
+    paymentHistory: [
+      ...prevHistory,
+      { action: 'undo_paid', previousMethod: prevMethod, timestamp: now },
+    ],
+    updatedAt: now,
+  };
+  saveStoredFallbackOrders(fallbackOrders);
+  await syncOrderToDevServer(fallbackOrders[idx]);
+  return { ...fallbackOrders[idx] };
+}
+
+/**
+ * getDayStats: Backed by confirmed payments in Asia/Kolkata via get_day_stats RPC.
  */
 export async function getDayStats(): Promise<DayStats> {
+  try {
+    const { data, error } = await supabase.rpc('get_day_stats');
+    if (error) {
+      throw new Error(error.message || 'Failed to load day stats');
+    }
+    if (data) {
+      return data as DayStats;
+    }
+  } catch (err: unknown) {
+    if (!ALLOW_DEV_FALLBACK || !isNetworkOrUnreachableError(err)) {
+      throw err;
+    }
+  }
+
   const orders = await getOrders();
+  const paidOrders = orders.filter(o => o.paymentStatus === 'paid');
+  const unpaidCompleted = orders.filter(
+    o => o.status === 'completed' && o.paymentStatus !== 'paid'
+  );
   const completed = orders.filter(o => o.status === 'completed');
 
+  const cash = paidOrders.filter(o => o.paymentMethod === 'cash');
+  const upi = paidOrders.filter(o => o.paymentMethod === 'upi');
+  const card = paidOrders.filter(o => o.paymentMethod === 'card');
+
   return {
-    totalOrders: orders.length,
-    revenue: orders.reduce((s, o) => s + o.total, 0),
+    totalOrders: paidOrders.length,
+    revenue: paidOrders.reduce((s, o) => s + o.total, 0),
+    cashRevenue: cash.reduce((s, o) => s + o.total, 0),
+    cashOrders: cash.length,
+    upiRevenue: upi.reduce((s, o) => s + o.total, 0),
+    upiOrders: upi.length,
+    cardRevenue: card.reduce((s, o) => s + o.total, 0),
+    cardOrders: card.length,
+    unpaidOrders: unpaidCompleted.length,
+    unpaidAmount: unpaidCompleted.reduce((s, o) => s + o.total, 0),
     avgPrepTime: completed.length > 0
       ? Math.round(
           completed.reduce((s, o) => {
@@ -1056,6 +1525,17 @@ export async function getDayStats(): Promise<DayStats> {
         )
       : 14,
   };
+}
+
+/**
+ * getInsights: Admin-only aggregates from confirmed payments in Asia/Kolkata.
+ */
+export async function getInsights(range: InsightsRange): Promise<InsightsData> {
+  const { data, error } = await supabase.rpc('get_insights', { p_range: range });
+  if (error) {
+    throw new Error(error.message || 'Failed to load insights');
+  }
+  return data as InsightsData;
 }
 
 /**

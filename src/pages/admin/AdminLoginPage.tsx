@@ -1,6 +1,6 @@
 import { useState, useId } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { setAuthenticated } from '../../lib/auth';
+import { signInAdmin } from '../../lib/auth';
 import Button from '../../components/ui/Button';
 import Input from '../../components/ui/Input';
 import { Lock, ArrowRight } from 'lucide-react';
@@ -10,14 +10,16 @@ export default function AdminLoginPage() {
   const [password, setPassword] = useState('gelafe123');
   const [emailError, setEmailError] = useState('');
   const [passwordError, setPasswordError] = useState('');
+  const [authError, setAuthError] = useState('');
   const [loading, setLoading] = useState(false);
 
   const navigate = useNavigate();
   const emailId = useId();
   const passwordId = useId();
 
-  function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    setAuthError('');
 
     let valid = true;
     if (!email.trim()) {
@@ -43,11 +45,16 @@ export default function AdminLoginPage() {
     if (!valid) return;
 
     setLoading(true);
-    setTimeout(() => {
-      setAuthenticated(true);
+    try {
+      const result = await signInAdmin(email.trim(), password);
+      if (result.success) {
+        navigate('/admin');
+      } else {
+        setAuthError(result.error || 'Invalid email or password');
+      }
+    } finally {
       setLoading(false);
-      navigate('/admin');
-    }, 400);
+    }
   }
 
   return (
@@ -65,6 +72,14 @@ export default function AdminLoginPage() {
         {/* Card */}
         <div className="bg-surface rounded-[var(--radius-card)] p-6 sm:p-8 border border-border shadow-[var(--shadow-lg)]">
           <form onSubmit={handleSubmit} className="space-y-4">
+            {authError && (
+              <div
+                role="alert"
+                className="rounded-[var(--radius-input)] bg-danger/10 border border-danger/30 px-3 py-2 text-xs font-medium text-danger"
+              >
+                {authError}
+              </div>
+            )}
             <Input
               id={emailId}
               label="Email address"
@@ -109,7 +124,7 @@ export default function AdminLoginPage() {
           <div className="mt-6 pt-4 border-t border-border text-center">
             <p className="text-xs text-muted flex items-center justify-center gap-1.5">
               <Lock className="h-3 w-3" />
-              Demo access: any email/password works
+              Authorized staff access only
             </p>
           </div>
         </div>

@@ -92,14 +92,29 @@ export interface SelectedOption {
 
 export type OrderStatus = 'received' | 'preparing' | 'ready' | 'completed' | 'rejected';
 
+export type PaymentStatus = 'unpaid' | 'paid';
+export type PaymentMethod = 'cash' | 'upi' | 'card';
+
+export interface PaymentHistoryEntry {
+  action: 'paid' | 'undo_paid';
+  method?: PaymentMethod;
+  previousMethod?: PaymentMethod;
+  timestamp: string;
+}
+
 export interface Order {
   id: string;
   orderNumber: number;
   customerName: string;
+  customerPhone?: string;
   tableNumber: string;
   items: OrderLineItem[];
   total: number; // paise
   status: OrderStatus;
+  paymentStatus?: PaymentStatus;
+  paidAt?: string;
+  paymentMethod?: PaymentMethod;
+  paymentHistory?: PaymentHistoryEntry[];
   rejectionReason?: string;
   createdAt: string; // ISO
   updatedAt: string; // ISO
@@ -117,6 +132,7 @@ export interface OrderLineItem {
 
 export interface PlaceOrderPayload {
   customerName: string;
+  customerPhone: string;
   tableNumber: string;
   items: {
     menuItemId: string;
@@ -132,5 +148,67 @@ export interface PlaceOrderPayload {
 export interface DayStats {
   totalOrders: number;
   revenue: number; // paise
+  cashRevenue: number;
+  cashOrders: number;
+  upiRevenue: number;
+  upiOrders: number;
+  cardRevenue: number;
+  cardOrders: number;
   avgPrepTime: number; // minutes
+  unpaidOrders?: number;
+  unpaidAmount?: number;
+}
+
+export type InsightsRange = 'day' | 'week' | 'month';
+
+export interface InsightsSeriesPoint {
+  label: string;
+  shortLabel?: string;
+  subLabel?: string;
+  cashRevenue: number;
+  upiRevenue: number;
+  cardRevenue: number;
+  totalRevenue: number;
+  cashOrders: number;
+  upiOrders: number;
+  cardOrders: number;
+  totalOrders: number;
+}
+
+export interface InsightsTopItem {
+  name: string;
+  quantity: number;
+  revenue: number;
+}
+
+export interface InsightsMethodSplit {
+  method: PaymentMethod;
+  revenue: number;
+  orders: number;
+}
+
+export interface InsightsData {
+  range: InsightsRange;
+  kpis: {
+    revenue: number;
+    prevRevenue: number;
+    orders: number;
+    prevOrders: number;
+    uniqueCustomers: number;
+    prevUniqueCustomers: number;
+    avgOrderValue: number;
+    prevAvgOrderValue: number;
+  };
+  methods: {
+    cash: { revenue: number; orders: number };
+    upi: { revenue: number; orders: number };
+    card: { revenue: number; orders: number };
+  };
+  series: InsightsSeriesPoint[];
+  topItems: InsightsTopItem[];
+  methodSplit: InsightsMethodSplit[];
+  customerSplit: {
+    newCustomers: number;
+    returningCustomers: number;
+  };
 }

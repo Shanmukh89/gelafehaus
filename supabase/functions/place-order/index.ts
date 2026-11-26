@@ -4,6 +4,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.0';
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
 // ─── Rate Limiting (In-Memory Sliding Window) ───
@@ -41,7 +42,7 @@ serve(async (req) => {
       '127.0.0.1';
 
     const body = await req.json();
-    const { tableNumber, customerName, items, idempotencyKey, turnstileToken } = body;
+    const { tableNumber, customerName, customerPhone, items, idempotencyKey, turnstileToken } = body;
 
     // ─── 1. Rate Limiting Checks ───
     if (checkRateLimit(clientIp, IP_LIMIT, IP_WINDOW_MS, ipHistory)) {
@@ -116,10 +117,11 @@ serve(async (req) => {
 
     // Format items for the RPC
     const formattedItems = (items || []).map((i: any) => ({
-      menu_item_id: i.menuItemId,
+      menuItemId: i.menuItemId,
       quantity: i.quantity,
       notes: i.notes || '',
-      option_ids: i.optionIds || [],
+      optionIds: i.optionIds || [],
+      offerId: i.offerId || null,
     }));
 
     const { data, error } = await supabaseAdmin.rpc('place_order', {
@@ -127,6 +129,7 @@ serve(async (req) => {
       p_customer_name: customerName,
       p_items: formattedItems,
       p_idempotency_key: idempotencyKey,
+      p_customer_phone: customerPhone || null,
     });
 
     if (error) {

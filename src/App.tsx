@@ -17,6 +17,7 @@ const OrdersPage = lazy(() => import('./pages/admin/OrdersPage'));
 const MenuManagerPage = lazy(() => import('./pages/admin/MenuManagerPage'));
 const OffersPage = lazy(() => import('./pages/admin/OffersPage'));
 const TodayPage = lazy(() => import('./pages/admin/TodayPage'));
+const InsightsPage = lazy(() => import('./pages/admin/InsightsPage'));
 
 function PageFallback() {
   return (
@@ -59,6 +60,7 @@ export default function App() {
               <Route path="menu" element={<MenuManagerPage />} />
               <Route path="offers" element={<OffersPage />} />
               <Route path="today" element={<TodayPage />} />
+              <Route path="insights" element={<InsightsPage />} />
             </Route>
 
             {/* Fallback */}

@@ -155,8 +155,9 @@ test.describe('Admin Soft-Delete & Limited-Time Offers (390px)', () => {
     await expect(page.locator('header')).toContainText('Checkout');
     await expect(page.locator('main')).toContainText('₹199');
 
-    // Fill customer name and place order
+    // Fill customer name, phone and place order
     await page.getByLabel(/Your Name/i).fill('Sam OfferTest');
+    await page.getByLabel(/Mobile Number/i).fill('9876543210');
     await page.getByRole('button', { name: /Place Order/i }).click();
 
     // Verify confirmation
@@ -230,6 +231,7 @@ test.describe('Admin Soft-Delete & Limited-Time Offers (390px)', () => {
       // Test 1: Live offer succeeds at offer price
       const liveOrder = await api.placeOrder({
         customerName: 'Live Offer User',
+        customerPhone: '9876543210',
         tableNumber: '07',
         items: [
           {
@@ -256,6 +258,7 @@ test.describe('Admin Soft-Delete & Limited-Time Offers (390px)', () => {
       try {
         await api.placeOrder({
           customerName: 'Expired User',
+          customerPhone: '9876543210',
           tableNumber: '07',
           items: [
             {
@@ -277,6 +280,7 @@ test.describe('Admin Soft-Delete & Limited-Time Offers (390px)', () => {
       try {
         await api.placeOrder({
           customerName: 'Tamperer',
+          customerPhone: '9876543210',
           tableNumber: '07',
           items: [
             {

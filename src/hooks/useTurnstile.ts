@@ -28,15 +28,27 @@ export function useTurnstile() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const widgetIdRef = useRef<string | null>(null);
   const resolveTokenRef = useRef<((token: string) => void) | null>(null);
-  const isReadyRef = useRef<boolean>(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scriptFailedRef = useRef(false);
 
   const siteKey = import.meta.env.VITE_TURNSTILE_SITE_KEY || DEFAULT_TEST_SITE_KEY;
 
-  // Initialize invisible Turnstile widget
+  const finishToken = useCallback((token: string) => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    if (resolveTokenRef.current) {
+      const fn = resolveTokenRef.current;
+      resolveTokenRef.current = null;
+      fn(token);
+    }
+  }, []);
+
+  // Initialize Turnstile widget
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
-    // Create an invisible container attached to DOM
     if (!containerRef.current) {
       const div = document.createElement('div');
       div.id = 'cf-turnstile-invisible-container';
@@ -55,30 +67,23 @@ export function useTurnstile() {
       try {
         widgetIdRef.current = window.turnstile.render(containerRef.current, {
           sitekey: siteKey,
-          size: 'invisible',
+          size: 'normal',
           callback: (token: string) => {
-            if (resolveTokenRef.current) {
-              resolveTokenRef.current(token);
-              resolveTokenRef.current = null;
-            }
+            finishToken(token);
           },
           'error-callback': (err: unknown) => {
             console.warn('Turnstile error callback:', err);
-            // Fall back with dummy token so users are never blocked in development
-            if (resolveTokenRef.current) {
-              resolveTokenRef.current('mock-turnstile-token');
-              resolveTokenRef.current = null;
-            }
+            finishToken('mock-turnstile-token');
           },
         });
-        isReadyRef.current = true;
       } catch (err) {
         console.warn('Failed to render Turnstile widget:', err);
+        scriptFailedRef.current = true;
       }
     }
 
-    // Check if script already exists
-    if (!document.getElementById('cf-turnstile-script')) {
+    const existingScript = document.getElementById('cf-turnstile-script') as HTMLScriptElement | null;
+    if (!existingScript) {
       const script = document.createElement('script');
       script.id = 'cf-turnstile-script';
       script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
@@ -87,12 +92,20 @@ export function useTurnstile() {
       script.onload = () => {
         initWidget();
       };
+      script.onerror = () => {
+        scriptFailedRef.current = true;
+        finishToken('script-error-turnstile-token');
+      };
       document.head.appendChild(script);
     } else if (window.turnstile) {
       initWidget();
     }
 
     return () => {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
       if (widgetIdRef.current && window.turnstile) {
         try {
           window.turnstile.remove(widgetIdRef.current);
@@ -102,40 +115,31 @@ export function useTurnstile() {
         widgetIdRef.current = null;
       }
     };
-  }, [siteKey]);
+  }, [siteKey, finishToken]);
 
   // Execute turnstile on demand (e.g. on Place Order submit)
   const executeTurnstile = useCallback((): Promise<string> => {
-    return new Promise((resolve) => {
-      if (!window.turnstile || !containerRef.current) {
-        // If script hasn't loaded or blocked, return dummy token fallback
+    return new Promise(resolve => {
+      if (scriptFailedRef.current || !window.turnstile || !containerRef.current || !widgetIdRef.current) {
         resolve('fallback-turnstile-token');
         return;
       }
 
       resolveTokenRef.current = resolve;
 
+      timerRef.current = setTimeout(() => {
+        finishToken('timeout-turnstile-token');
+      }, 1500);
+
       try {
-        window.turnstile.execute(containerRef.current);
+        window.turnstile.reset(widgetIdRef.current);
+        window.turnstile.execute(widgetIdRef.current);
       } catch (err) {
         console.warn('Turnstile execute failed, using fallback:', err);
-        resolve('fallback-turnstile-token');
+        finishToken('fallback-turnstile-token');
       }
-
-      // Safety timeout in case callback doesn't fire (1.2s in local dev/testing, 4s in production)
-      const timeoutMs =
-        typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
-          ? 1200
-          : 4000;
-
-      setTimeout(() => {
-        if (resolveTokenRef.current) {
-          resolveTokenRef.current('timeout-turnstile-token');
-          resolveTokenRef.current = null;
-        }
-      }, timeoutMs);
     });
-  }, []);
+  }, [finishToken]);
 
   return { executeTurnstile };
 }

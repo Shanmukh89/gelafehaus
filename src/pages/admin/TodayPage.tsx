@@ -1,12 +1,13 @@
 import { useEffect, useState, useCallback } from 'react';
-import { getDayStats, getOrders } from '../../lib/api';
+import { getDayStats, getOrders, subscribeAdminRealtime, undoOrderPaid } from '../../lib/api';
 import type { DayStats, Order, OrderStatus } from '../../lib/types';
 import { formatPrice, formatElapsed } from '../../lib/utils';
 import Badge from '../../components/ui/Badge';
 import Chip from '../../components/ui/Chip';
 import Skeleton from '../../components/ui/Skeleton';
 import ErrorState from '../../components/ui/ErrorState';
-import { ShoppingBag, IndianRupee, Clock, TrendingUp, Calendar } from 'lucide-react';
+import { useToast } from '../../components/ui/useToast';
+import { ShoppingBag, IndianRupee, Clock, TrendingUp, Calendar, AlertCircle, RotateCcw, Phone, Banknote, Smartphone, CreditCard, AlertTriangle } from 'lucide-react';
 
 export default function TodayPage() {
   const [stats, setStats] = useState<DayStats | null>(null);
@@ -14,6 +15,19 @@ export default function TodayPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>('all');
+  const { toast } = useToast();
+
+  async function handleUndoPaid(orderId: string) {
+    try {
+      const updated = await undoOrderPaid(orderId);
+      setOrders(prev => prev.map(o => (o.id === updated.id ? updated : o)));
+      const newStats = await getDayStats();
+      setStats(newStats);
+      toast(`Payment undone for Order #${updated.orderNumber}`, 'info');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to undo payment', 'error');
+    }
+  }
 
   const fetchData = useCallback(async () => {
     try {
@@ -49,10 +63,15 @@ export default function TodayPage() {
         }
       });
 
+    const unsubscribe = subscribeAdminRealtime(() => {
+      void fetchData();
+    });
+
     return () => {
       ignore = true;
+      unsubscribe();
     };
-  }, []);
+  }, [fetchData]);
 
   const filteredOrders = orders.filter(o =>
     statusFilter === 'all' ? true : o.status === statusFilter
@@ -94,17 +113,20 @@ export default function TodayPage() {
       {!loading && !error && stats && (
         <>
           {/* Summary Stat Cards */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            {/* Total Orders */}
-            <div className="bg-surface rounded-[var(--radius-card)] p-5 border border-border shadow-[var(--shadow-sm)] flex items-start justify-between">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {/* Paid Orders */}
+            <div
+              data-testid="today-paid-orders-card"
+              className="bg-surface rounded-[var(--radius-card)] p-5 border border-border shadow-[var(--shadow-sm)] flex items-start justify-between"
+            >
               <div>
-                <p className="text-xs font-semibold text-muted uppercase tracking-wider">Total Orders</p>
+                <p className="text-xs font-semibold text-muted uppercase tracking-wider">Paid Orders</p>
                 <p className="text-3xl font-heading font-bold text-ink mt-2 tabular-nums">
                   {stats.totalOrders}
                 </p>
                 <p className="text-xs text-muted mt-1 flex items-center gap-1">
                   <TrendingUp className="h-3 w-3 text-success" />
-                  <span>Dine-in QR orders</span>
+                  <span>Confirmed paid today</span>
                 </p>
               </div>
               <div className="h-10 w-10 rounded-[var(--radius-input)] bg-primary/10 flex items-center justify-center text-primary shrink-0">
@@ -112,17 +134,40 @@ export default function TodayPage() {
               </div>
             </div>
 
-            {/* Total Revenue */}
-            <div className="bg-surface rounded-[var(--radius-card)] p-5 border border-border shadow-[var(--shadow-sm)] flex items-start justify-between">
+            {/* Paid Revenue (Total revenue) */}
+            <div
+              data-testid="today-paid-revenue-card"
+              className="bg-surface rounded-[var(--radius-card)] p-5 border border-border shadow-[var(--shadow-sm)] flex items-start justify-between"
+            >
               <div>
-                <p className="text-xs font-semibold text-muted uppercase tracking-wider">Today&rsquo;s Revenue</p>
+                <p className="text-xs font-semibold text-muted uppercase tracking-wider">Total Revenue</p>
                 <p className="text-3xl font-heading font-bold text-ink mt-2 tabular-nums">
                   {formatPrice(stats.revenue)}
                 </p>
-                <p className="text-xs text-muted mt-1">Pay-at-counter total</p>
+                <p className="text-xs text-muted mt-1">Confirmed payments only</p>
               </div>
               <div className="h-10 w-10 rounded-[var(--radius-input)] bg-success/10 flex items-center justify-center text-success shrink-0">
                 <IndianRupee className="h-5 w-5" />
+              </div>
+            </div>
+
+            {/* Unpaid Completed */}
+            <div
+              data-testid="today-unpaid-card"
+              className="bg-surface rounded-[var(--radius-card)] p-5 border border-danger/30 shadow-[var(--shadow-sm)] flex items-start justify-between"
+            >
+              <div>
+                <p className="text-xs font-semibold text-danger uppercase tracking-wider">Unpaid</p>
+                <p className="text-3xl font-heading font-bold text-ink mt-2 tabular-nums">
+                  {stats.unpaidOrders ?? 0}
+                  <span className="text-base font-semibold text-danger ml-2">
+                    ({formatPrice(stats.unpaidAmount ?? 0)})
+                  </span>
+                </p>
+                <p className="text-xs text-muted mt-1">Completed & awaiting payment</p>
+              </div>
+              <div className="h-10 w-10 rounded-[var(--radius-input)] bg-danger/10 flex items-center justify-center text-danger shrink-0">
+                <AlertCircle className="h-5 w-5" />
               </div>
             </div>
 
@@ -140,6 +185,86 @@ export default function TodayPage() {
               </div>
             </div>
           </div>
+
+          {/* Payment Method Breakdown */}
+          {(() => {
+            const splitSum = (stats.cashRevenue ?? 0) + (stats.upiRevenue ?? 0) + (stats.cardRevenue ?? 0);
+            const hasMismatch = splitSum !== stats.revenue;
+            const hasCard = (stats.cardRevenue ?? 0) > 0 || (stats.cardOrders ?? 0) > 0;
+            return (
+              <div className="space-y-2">
+                <div className={`grid grid-cols-1 sm:grid-cols-2 ${hasCard ? 'lg:grid-cols-3' : ''} gap-4`}>
+                  <div
+                    data-testid="today-cash-card"
+                    className="bg-surface rounded-[var(--radius-card)] p-4 border border-border shadow-[var(--shadow-sm)] flex items-start justify-between"
+                  >
+                    <div>
+                      <p className="text-xs font-semibold text-muted uppercase tracking-wider">Cash taken</p>
+                      <p className="text-2xl font-heading font-bold text-ink mt-1.5 tabular-nums">
+                        {formatPrice(stats.cashRevenue ?? 0)}
+                      </p>
+                      <p className="text-xs text-muted mt-0.5 tabular-nums">
+                        {stats.cashOrders ?? 0} {(stats.cashOrders ?? 0) === 1 ? 'order' : 'orders'}
+                      </p>
+                    </div>
+                    <div className="h-9 w-9 rounded-[var(--radius-input)] bg-primary/10 flex items-center justify-center text-primary shrink-0">
+                      <Banknote className="h-4 w-4" />
+                    </div>
+                  </div>
+
+                  <div
+                    data-testid="today-upi-card"
+                    className="bg-surface rounded-[var(--radius-card)] p-4 border border-border shadow-[var(--shadow-sm)] flex items-start justify-between"
+                  >
+                    <div>
+                      <p className="text-xs font-semibold text-muted uppercase tracking-wider">UPI received</p>
+                      <p className="text-2xl font-heading font-bold text-ink mt-1.5 tabular-nums">
+                        {formatPrice(stats.upiRevenue ?? 0)}
+                      </p>
+                      <p className="text-xs text-muted mt-0.5 tabular-nums">
+                        {stats.upiOrders ?? 0} {(stats.upiOrders ?? 0) === 1 ? 'order' : 'orders'}
+                      </p>
+                    </div>
+                    <div className="h-9 w-9 rounded-[var(--radius-input)] bg-success/10 flex items-center justify-center text-success shrink-0">
+                      <Smartphone className="h-4 w-4" />
+                    </div>
+                  </div>
+
+                  {hasCard && (
+                    <div
+                      data-testid="today-card-card"
+                      className="bg-surface rounded-[var(--radius-card)] p-4 border border-border shadow-[var(--shadow-sm)] flex items-start justify-between"
+                    >
+                      <div>
+                        <p className="text-xs font-semibold text-muted uppercase tracking-wider">Card</p>
+                        <p className="text-2xl font-heading font-bold text-ink mt-1.5 tabular-nums">
+                          {formatPrice(stats.cardRevenue ?? 0)}
+                        </p>
+                        <p className="text-xs text-muted mt-0.5 tabular-nums">
+                          {stats.cardOrders ?? 0} {(stats.cardOrders ?? 0) === 1 ? 'order' : 'orders'}
+                        </p>
+                      </div>
+                      <div className="h-9 w-9 rounded-[var(--radius-input)] bg-warning/10 flex items-center justify-center text-warning shrink-0">
+                        <CreditCard className="h-4 w-4" />
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {hasMismatch && (
+                  <p
+                    role="alert"
+                    className="text-xs font-medium text-danger flex items-center gap-1.5 px-1"
+                  >
+                    <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                    <span>
+                      Method split ({formatPrice(splitSum)}) does not match Total Revenue ({formatPrice(stats.revenue)}).
+                    </span>
+                  </p>
+                )}
+              </div>
+            );
+          })()}
 
           {/* Orders Section */}
           <div className="bg-surface rounded-[var(--radius-card)] border border-border shadow-[var(--shadow-sm)] p-5 space-y-4">
@@ -202,8 +327,17 @@ export default function TodayPage() {
                         </Badge>
                       </div>
 
-                      <p className="text-xs text-muted mt-1">
-                        Customer: <span className="text-ink font-medium">{order.customerName}</span> &middot; Ordered {formatElapsed(order.createdAt)}
+                      <p className="text-xs text-muted mt-1 flex flex-wrap items-center gap-2">
+                        <span>
+                          Customer: <span className="text-ink font-medium">{order.customerName}</span>
+                        </span>
+                        {order.customerPhone && (
+                          <span className="inline-flex items-center gap-1 text-ink font-medium tabular-nums">
+                            <Phone className="h-3 w-3 text-muted" />
+                            {order.customerPhone}
+                          </span>
+                        )}
+                        <span>&middot; Ordered {formatElapsed(order.createdAt)}</span>
                       </p>
 
                       <div className="mt-2 text-xs text-muted">
@@ -213,13 +347,49 @@ export default function TodayPage() {
                           </span>
                         ))}
                       </div>
+
+                      {order.paymentHistory && order.paymentHistory.length > 0 && (
+                        <div className="mt-1.5 text-[11px] text-muted space-y-0.5">
+                          {order.paymentHistory.map((h, idx) => (
+                            <p key={idx}>
+                              {h.action === 'paid'
+                                ? `Paid (${(h.method || '').toUpperCase()})`
+                                : `Payment undone (was ${(h.previousMethod || '').toUpperCase()})`}
+                              {' · '}
+                              {new Date(h.timestamp).toLocaleTimeString([], {
+                                hour: '2-digit',
+                                minute: '2-digit',
+                              })}
+                            </p>
+                          ))}
+                        </div>
+                      )}
                     </div>
 
-                    <div className="text-left md:text-right shrink-0">
+                    <div className="text-left md:text-right shrink-0 space-y-1">
                       <p className="text-base font-heading font-bold text-ink tabular-nums">
                         {formatPrice(order.total)}
                       </p>
-                      <p className="text-[11px] text-muted">Pay at counter</p>
+                      {order.paymentStatus === 'paid' ? (
+                        <div className="flex items-center md:justify-end gap-2">
+                          <Badge variant="success">
+                            Paid · {(order.paymentMethod || 'cash').toUpperCase()}
+                          </Badge>
+                          <button
+                            type="button"
+                            onClick={() => handleUndoPaid(order.id)}
+                            className="inline-flex items-center gap-1 text-xs text-muted hover:text-danger transition-colors cursor-pointer"
+                            aria-label={`Undo paid for order #${order.orderNumber}`}
+                          >
+                            <RotateCcw className="h-3 w-3" />
+                            <span>Undo</span>
+                          </button>
+                        </div>
+                      ) : (
+                        <p className="text-[11px] font-medium text-danger">
+                          {order.status === 'completed' ? 'Unpaid' : 'Pay at counter'}
+                        </p>
+                      )}
                     </div>
                   </div>
                 ))}
